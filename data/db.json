@@ -1,0 +1,45 @@
+{
+  "users": [
+    {
+      "id": "usr-01",
+      "loginId": "admin",
+      "name": "Zayem Bhuiya / জায়িম ভুইয়া",
+      "role": "master_admin",
+      "phone": "01700-111111",
+      "status": "active",
+      "pinHash": "263d453e5b1ad08bf5171393e02a2e846da991178abaf97929decf0aa1f67175",
+      "pinSalt": "3fb8fed4454fc875935789450c0702a2",
+      "createdAt": "2026-01-01T08:00:00Z"
+    }
+  ],
+  "counters": [],
+  "vehicles": [],
+  "routes": [],
+  "schedules": [],
+  "bookings": [],
+  "reconciliations": [],
+  "auditLogs": [
+    {
+      "userId": "usr-01",
+      "userName": "Zayem Bhuiya / জায়িম ভুইয়া",
+      "role": "master_admin",
+      "actionType": "LOGIN",
+      "entityType": "USER",
+      "entityId": "usr-01",
+      "details": "Zayem Bhuiya / জায়িম ভুইয়া (master_admin) সফলভাবে সিস্টেমে প্রবেশ করেছেন।",
+      "id": "aud-1792967445448-331",
+      "timestamp": "2026-10-25T22:30:45.448Z"
+    }
+  ],
+  "companies": [],
+  "settings": {
+    "companyName": "Counter Management System",
+    "subTitle": "কাউন্টার বুকিং ও ট্রিপ ইনফরমেশন",
+    "hotline": "01711-000000",
+    "defaultFare": 550,
+    "noticeText": "",
+    "currency": "৳",
+    "timezone": "Asia/Dhaka"
+  },
+  "supervisors": []
+}

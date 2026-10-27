@@ -1,0 +1,8 @@
+{
+  "name": "Counter Management System",
+  "description": "Counter Management System — আধুনিক ও পূর্ণাঙ্গ বাস কাউন্টার বুকিং, ট্রিপ শিডিউলিং, সিট ম্যানেজমেন্ট ও আর্থিক সমন্বয় সিস্টেম।",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
