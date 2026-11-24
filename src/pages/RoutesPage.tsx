@@ -3,6 +3,7 @@ import { useAuth } from '../context/AuthContext.tsx';
 import { api } from '../services/api.ts';
 import type { RouteItem } from '../types/index.ts';
 import { formatTaka, toBengaliDigits } from '../utils/formatters.ts';
+import { sortRoutesByNumber } from '../utils/routeSort.ts';
 import {
   MapPin,
   Plus,
@@ -18,7 +19,7 @@ import {
 } from 'lucide-react';
 
 export const RoutesPage: React.FC = () => {
-  const { isMasterAdmin, isModerator, isMasterBookingCounter, canManageTrips } = useAuth();
+  const { isMasterAdmin, isModerator, isMasterBookingCounter, canManageTrips, activeCompanyId, user } = useAuth();
   const [routes, setRoutes] = useState<RouteItem[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [searchTerm, setSearchTerm] = useState<string>('');
@@ -30,7 +31,7 @@ export const RoutesPage: React.FC = () => {
   const [origin, setOrigin] = useState<string>('');
   const [destination, setDestination] = useState<string>('');
   const [stopsText, setStopsText] = useState<string>('');
-  const [direction, setDirection] = useState<'UP' | 'DOWN' | 'BOTH'>('UP');
+  const [direction, setDirection] = useState<'UP' | 'DOWN'>('UP');
   const [directionFilter, setDirectionFilter] = useState<'ALL' | 'UP' | 'DOWN'>('ALL');
   const [baseFare, setBaseFare] = useState<string>('');
   const [distanceKm, setDistanceKm] = useState<string>('');
@@ -42,7 +43,7 @@ export const RoutesPage: React.FC = () => {
     setLoading(true);
     try {
       const res = await api.getRoutes();
-      setRoutes(res.routes);
+      setRoutes(sortRoutesByNumber(res.routes || []));
     } catch (err) {
       console.error('Failed to load routes:', err);
     } finally {
@@ -115,6 +116,7 @@ export const RoutesPage: React.FC = () => {
           direction,
           baseFare: fareNum,
           distanceKm: distNum,
+          companyId: activeCompanyId || user?.companyId,
         });
         setSuccessMsg(`নতুন রুট "${finalName}" সফলভাবে তৈরি হয়েছে!`);
       }
@@ -141,8 +143,8 @@ export const RoutesPage: React.FC = () => {
   };
 
   const filtered = routes.filter((r) => {
-    if (directionFilter === 'UP' && r.direction !== 'UP' && r.direction !== 'BOTH') return false;
-    if (directionFilter === 'DOWN' && r.direction !== 'DOWN' && r.direction !== 'BOTH') return false;
+    if (directionFilter === 'UP' && r.direction !== 'UP') return false;
+    if (directionFilter === 'DOWN' && r.direction !== 'DOWN') return false;
     if (!searchTerm.trim()) return true;
     const term = searchTerm.toLowerCase();
     return (
@@ -391,51 +393,39 @@ export const RoutesPage: React.FC = () => {
             )}
 
             <form onSubmit={handleSave} className="space-y-4">
-              {/* Route Direction: UP / DOWN / BOTH */}
+              {/* Route Direction: UP / DOWN */}
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1.5">
-                  রুটের ট্রিপ দিক (আপ ট্রিপ রুট / ডাউন ট্রিপ রুট) *
+                  রুটের ট্রিপ দিক (১. আপ রুট / ২. ডাউন রুট) *
                 </label>
-                <div className="grid grid-cols-3 gap-2">
+                <div className="grid grid-cols-2 gap-2.5">
                   <button
                     type="button"
                     onClick={() => setDirection('UP')}
-                    className={`p-2.5 rounded-xl border text-center transition-all cursor-pointer ${
+                    className={`p-3 rounded-xl border text-center transition-all cursor-pointer ${
                       direction === 'UP'
                         ? 'bg-blue-50 border-blue-600 text-blue-900 ring-2 ring-blue-500/20 font-bold'
                         : 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100'
                     }`}
                   >
-                    <div className="text-xs font-bold">আপ রুট</div>
+                    <div className="text-xs font-bold">১. আপ রুট (UP)</div>
                     <div className="text-[10px] text-slate-500 mt-0.5">মাদারীপুর ➔ ঢাকা</div>
                   </button>
                   <button
                     type="button"
                     onClick={() => setDirection('DOWN')}
-                    className={`p-2.5 rounded-xl border text-center transition-all cursor-pointer ${
+                    className={`p-3 rounded-xl border text-center transition-all cursor-pointer ${
                       direction === 'DOWN'
                         ? 'bg-emerald-50 border-emerald-600 text-emerald-900 ring-2 ring-emerald-500/20 font-bold'
                         : 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100'
                     }`}
                   >
-                    <div className="text-xs font-bold">ডাউন রুট</div>
+                    <div className="text-xs font-bold">২. ডাউন রুট (DOWN)</div>
                     <div className="text-[10px] text-slate-500 mt-0.5">ঢাকা ➔ মাদারীপুর</div>
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => setDirection('BOTH')}
-                    className={`p-2.5 rounded-xl border text-center transition-all cursor-pointer ${
-                      direction === 'BOTH'
-                        ? 'bg-purple-50 border-purple-600 text-purple-900 ring-2 ring-purple-500/20 font-bold'
-                        : 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100'
-                    }`}
-                  >
-                    <div className="text-xs font-bold">উভয় দিক</div>
-                    <div className="text-[10px] text-slate-500 mt-0.5">দ্বিমুখী রুট</div>
-                  </button>
                 </div>
-                <p className="text-[11px] text-slate-500 mt-1">
-                  আপ ও ডাউন রুট আলাদা করলে সমন্বয় করার সময় রুট জোড়া হয়ে পূর্ণাঙ্গ ট্রিপের পূর্ণ রুট তৈরি হবে (যেমন: কালকিনি - কদমতলী + গুলিস্তান - মাদারীপুর = ১টি পুর্নাঙ্গ ট্রিপ)।
+                <p className="text-[11px] text-slate-500 mt-1.5">
+                  আপ ও ডাউন রুট আলাদা থাকলে সমন্বয়ের সময় রুট জোড়া হয়ে ১টি পূর্ণাঙ্গ ট্রিপের হিসাব পাওয়া যাবে (যেমন: কালকিনি - কদমতলী + গুলিস্তান - মাদারীপুর = কালকিনি - কদমতলী - গুলিস্তান - মাদারীপুর ১টি পূর্ণাঙ্গ ট্রিপ)।
                 </p>
               </div>
 

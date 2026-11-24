@@ -14,8 +14,17 @@ export interface User {
   id: string;
   loginId: string;
   name: string;
-  role: 'super_admin' | 'master_admin' | 'moderator' | 'booking_point';
+  role: 'super_admin' | 'company_admin' | 'master_admin' | 'moderator' | 'booking_point' | 'down_counter_head';
   companyId?: string;
+  company?: {
+    id?: string;
+    name: string;
+    logoUrl?: string;
+    address?: string;
+    phone?: string;
+    subscriptionExpiry?: string;
+    status?: string;
+  };
   counterId?: string;
   counterName?: string;
   counterCode?: string;
@@ -26,25 +35,47 @@ export interface User {
   createdAt: string;
 }
 
+export interface CompanySummaryStats {
+  id: string;
+  name: string;
+  logoUrl?: string;
+  phone: string;
+  adminLoginId: string;
+  subscriptionExpiry: string;
+  status: 'active' | 'expired' | 'suspended';
+  vehiclesCount: number;
+  routesCount: number;
+  supervisorsCount: number;
+  driversCount: number;
+  todayTripsCount: number;
+}
+
 // Supervisor is strictly a name/profile directory without login credentials
 export interface Supervisor {
   id: string;
+  companyId?: string;
   name: string;
   phone?: string;
   status: 'active' | 'inactive';
+  totalTrips?: number; // Total completed/reconciled full trips
+  rank?: number;
   createdAt: string;
 }
 
-// Driver is strictly a name directory without login credentials
+// Driver is strictly a name/profile directory without login credentials
 export interface Driver {
   id: string;
+  companyId?: string;
   name: string;
+  phone?: string;
   status: 'active' | 'inactive';
+  totalTrips?: number; // Total completed/reconciled full trips
+  rank?: number;
   createdAt: string;
 }
 
 export type CounterType = 'master_booking' | 'road_booking';
-export type CounterDirection = 'UP' | 'DOWN' | 'BOTH';
+export type CounterDirection = 'UP' | 'DOWN'; // strictly UP (আপ কাউন্টার) or DOWN (ডাউন কাউন্টার)
 
 export interface Counter {
   id: string;
@@ -52,7 +83,7 @@ export interface Counter {
   name: string;
   code: string;
   counterType: CounterType; // 'master_booking' or 'road_booking'
-  tripDirection?: CounterDirection; // 'UP' (আপ ট্রিপ), 'DOWN' (ডাউন ট্রিপ), 'BOTH' (উভয়)
+  tripDirection: CounterDirection; // 'UP' (আপ ট্রিপ) or 'DOWN' (ডাউন ট্রিপ)
   address: string;
   phone: string;
   seatColor: string; // HEX color code
@@ -64,6 +95,7 @@ export type SeatCapacity = 42 | 46;
 
 export interface Vehicle {
   id: string;
+  companyId?: string;
   regNo: string;
   seatCapacity: SeatCapacity;
   ownerName: string; // গাড়ি মালিকের নাম
@@ -81,7 +113,7 @@ export interface RouteItem {
   origin: string;
   destination: string;
   intermediateStops: string[];
-  direction?: 'UP' | 'DOWN' | 'BOTH'; // আপ ট্রিপ, ডাউন ট্রিপ বা উভয় দিক
+  direction: 'UP' | 'DOWN'; // strictly UP (আপ রুট) or DOWN (ডাউন রুট)
   baseFare?: number;
   distanceKm?: number;
   status: 'active' | 'inactive';
@@ -92,6 +124,7 @@ export type TripDirection = 'UP' | 'DOWN'; // UP: Madaripur to Dest, DOWN: Dest 
 
 export interface Schedule {
   id: string;
+  companyId?: string;
   tripNo: string;
   date: string; // YYYY-MM-DD
   departureTime: string; // e.g. "06:30 AM"
@@ -109,6 +142,7 @@ export interface Schedule {
   direction: TripDirection;
   fare: number;
   isNightHold: boolean;
+  nightHoldNextDate?: string; // YYYY-MM-DD for linked next-day down trip
   status: 'scheduled' | 'running' | 'completed' | 'cancelled';
   reconciled: boolean;
   reconciliationId?: string;
@@ -132,6 +166,7 @@ export interface ScheduleDetail {
 
 export interface Booking {
   id: string;
+  companyId?: string;
   ticketNo: string;
   scheduleId: string;
   tripNo: string;
@@ -162,12 +197,14 @@ export interface Booking {
 
 export interface Reconciliation {
   id: string;
+  companyId?: string;
   reconNo: string;
   operationalDate: string;
   vehicleId: string;
   vehicleRegNo: string;
   routeName: string;
   supervisor: string;
+  driver?: string;
   upTripId?: string;
   upTripNo?: string;
   downTripId?: string;
@@ -221,10 +258,68 @@ export interface AnalyticsSummary {
     total: number;
   }>;
   counterWiseSales: Array<{
+    counterId?: string;
     counterName: string;
     counterCode: string;
     seatColor: string;
     seatsSold: number;
     totalRevenue: number;
   }>;
+}
+
+export interface WeeklyTrendDay {
+  date: string; // YYYY-MM-DD
+  dayShortBn: string;
+  dayFullBn: string;
+  ticketSalesAmount: number;
+  ticketsCount: number;
+  seatsSold: number;
+  fuelExpenseAmount: number;
+  fuelLiters: number;
+  netBalance: number;
+}
+
+export interface WeeklyTrendsSummary {
+  startDate: string;
+  endDate: string;
+  days: WeeklyTrendDay[];
+  totals: {
+    totalTicketSales: number;
+    totalFuelExpense: number;
+    totalNetBalance: number;
+    totalTicketsCount: number;
+    totalSeatsSold: number;
+    totalFuelLiters: number;
+    fuelToSalesRatio: number;
+  };
+}
+
+export interface FuelEntry {
+  id: string;
+  companyId?: string;
+  reconciliationId?: string;
+  vehicleId?: string;
+  serialNo?: string;
+  date: string;
+  dayOfWeek: string;
+  time: string;
+  vehicleRegNo: string;
+  direction: string;
+  route: string;
+  supervisor: string;
+  driver: string;
+  totalKm: number;
+  mileage: number;
+  expectedFuelLiters: number;
+  actualFuelLiters: number;
+  fuelRatePerLiter: number;
+  totalCost: number;
+  fuelDifference: number;
+  notes?: string;
+  createdAt: string;
+}
+
+export interface FuelSettings {
+  commonMileage: number;
+  fuelPricePerLiter: number;
 }

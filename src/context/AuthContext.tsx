@@ -6,10 +6,14 @@ interface AuthContextType {
   user: User | null;
   token: string | null;
   loading: boolean;
+  activeCompanyId: string | null;
+  setActiveCompanyId: (id: string | null) => void;
   login: (loginId: string, pin: string) => Promise<void>;
   logout: () => Promise<void>;
   switchDemoUser: (loginId: string, pin: string) => Promise<void>;
   hasRole: (roles: Array<User['role']>) => boolean;
+  isSuperAdmin: boolean;
+  isCompanyAdmin: boolean;
   isMasterAdmin: boolean;
   isModerator: boolean;
   isBookingPoint: boolean;
@@ -23,11 +27,25 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
   const [token, setToken] = useState<string | null>(localStorage.getItem('zb_auth_token'));
+  const [activeCompanyId, setActiveCompanyIdState] = useState<string | null>(
+    localStorage.getItem('zb_active_company_id')
+  );
   const [loading, setLoading] = useState<boolean>(true);
+
+  const setActiveCompanyId = (id: string | null) => {
+    if (id) {
+      localStorage.setItem('zb_active_company_id', id);
+    } else {
+      localStorage.removeItem('zb_active_company_id');
+    }
+    setActiveCompanyIdState(id);
+    refreshUser();
+  };
 
   const refreshUser = async () => {
     const savedToken = localStorage.getItem('zb_auth_token');
     if (!savedToken) {
+      await api.ensureServerHydrated().catch(() => {});
       setUser(null);
       setLoading(false);
       return;
@@ -35,10 +53,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     try {
       const data = await api.getMe();
       setUser(data.user);
-    } catch {
-      localStorage.removeItem('zb_auth_token');
-      setUser(null);
-      setToken(null);
+    } catch (err: any) {
+      // Only clear tokens if the server explicitly responded with 401 Unauthorized after auto-rehydrate
+      if (err?.status === 401) {
+        localStorage.removeItem('zb_auth_token');
+        localStorage.removeItem('zb_active_company_id');
+        setUser(null);
+        setToken(null);
+        setActiveCompanyIdState(null);
+      }
     } finally {
       setLoading(false);
     }
@@ -46,6 +69,26 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   useEffect(() => {
     refreshUser();
+
+    const handleResumeSync = () => {
+      if (document.visibilityState === 'visible') {
+        api.ensureServerHydrated(true).catch(() => {});
+      }
+    };
+
+    window.addEventListener('focus', handleResumeSync);
+    document.addEventListener('visibilitychange', handleResumeSync);
+    const interval = setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        api.ensureServerHydrated(true).catch(() => {});
+      }
+    }, 120000);
+
+    return () => {
+      window.removeEventListener('focus', handleResumeSync);
+      document.removeEventListener('visibilitychange', handleResumeSync);
+      clearInterval(interval);
+    };
   }, []);
 
   const login = async (loginId: string, pin: string) => {
@@ -53,6 +96,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     try {
       const res = await api.login(loginId, pin);
       localStorage.setItem('zb_auth_token', res.token);
+      if (res.user.companyId) {
+        localStorage.setItem('zb_active_company_id', res.user.companyId);
+        setActiveCompanyIdState(res.user.companyId);
+      }
       setToken(res.token);
       setUser(res.user);
     } finally {
@@ -69,8 +116,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       await api.logout();
     } finally {
       localStorage.removeItem('zb_auth_token');
+      localStorage.removeItem('zb_active_company_id');
+      localStorage.removeItem('zb_active_tab');
       setToken(null);
       setUser(null);
+      setActiveCompanyIdState(null);
     }
   };
 
@@ -79,7 +129,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return roles.includes(user.role);
   };
 
-  const isMasterAdmin = user?.role === 'master_admin';
+  const isSuperAdmin = user?.role === 'super_admin' || (!user?.companyId && user?.role === 'master_admin');
+  const isCompanyAdmin = user?.role === 'company_admin';
+  const isMasterAdmin = isSuperAdmin || isCompanyAdmin || user?.role === 'master_admin';
   const isModerator = user?.role === 'moderator' || isMasterAdmin;
   const isBookingPoint = user?.role === 'booking_point';
   const isMasterBookingCounter = user?.role === 'booking_point' && user?.counterType === 'master_booking';
@@ -91,10 +143,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         user,
         token,
         loading,
+        activeCompanyId,
+        setActiveCompanyId,
         login,
         logout,
         switchDemoUser,
         hasRole,
+        isSuperAdmin,
+        isCompanyAdmin,
         isMasterAdmin,
         isModerator,
         isBookingPoint,

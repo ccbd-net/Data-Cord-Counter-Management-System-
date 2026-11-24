@@ -26,7 +26,7 @@ import {
 } from 'lucide-react';
 
 export const CompanyAdminPage: React.FC = () => {
-  const { isMasterAdmin, user } = useAuth();
+  const { isMasterAdmin, user, activeCompanyId, setActiveCompanyId } = useAuth();
   const [companies, setCompanies] = useState<Company[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [searchTerm, setSearchTerm] = useState<string>('');
@@ -43,13 +43,16 @@ export const CompanyAdminPage: React.FC = () => {
   const [adminLoginId, setAdminLoginId] = useState<string>('');
   const [pin, setPin] = useState<string>('');
 
-  // Extend Subscription Modal
-  const [extendingCompany, setExtendingCompany] = useState<Company | null>(null);
-  const [extendDays, setExtendDays] = useState<number>(30);
-
   const [errorMsg, setErrorMsg] = useState<string>('');
   const [successMsg, setSuccessMsg] = useState<string>('');
   const [submitting, setSubmitting] = useState<boolean>(false);
+
+  // Quick Reset Admin ID & PIN state
+  const [resetModalCompany, setResetModalCompany] = useState<Company | null>(null);
+  const [newAdminLoginId, setNewAdminLoginId] = useState<string>('');
+  const [newPin, setNewPin] = useState<string>('');
+  const [resetErrorMsg, setResetErrorMsg] = useState<string>('');
+  const [resetSubmitting, setResetSubmitting] = useState<boolean>(false);
 
   const fetchCompanies = async () => {
     setLoading(true);
@@ -80,7 +83,6 @@ export const CompanyAdminPage: React.FC = () => {
     setLogoUrl('');
     setAddress('');
     setPhone('');
-    // Default 1 year from today
     const nextYear = new Date();
     nextYear.setFullYear(nextYear.getFullYear() + 1);
     setSubscriptionExpiry(nextYear.toISOString().split('T')[0]);
@@ -98,7 +100,7 @@ export const CompanyAdminPage: React.FC = () => {
     setPhone(c.phone || '');
     setSubscriptionExpiry(c.subscriptionExpiry || '');
     setAdminLoginId(c.adminLoginId || '');
-    setPin(''); // Leave blank if not changing
+    setPin('');
     setErrorMsg('');
     setIsModalOpen(true);
   };
@@ -120,12 +122,15 @@ export const CompanyAdminPage: React.FC = () => {
           adminLoginId,
           pin: pin.trim() ? pin.trim() : undefined,
         });
-        setSuccessMsg(`কোম্পানি "${name}" এর সাবস্ক্রিপশন ও তথ্য সফলভাবে আপডেট হয়েছে!`);
+        setSuccessMsg(`কোম্পানি "${name}" এর সাবস্ক্রিপশন ও লোগো তথ্য সফলভাবে আপডেট হয়েছে!`);
+        if (activeCompanyId === editingCompany.id || user?.companyId === editingCompany.id) {
+          setActiveCompanyId(editingCompany.id);
+        }
       } else {
         if (!pin.trim() || pin.trim().length < 4 || pin.trim().length > 6) {
           throw new Error('এডমিন পিন অবশ্যই ৪ থেকে ৬ ডিজিটের হতে হবে।');
         }
-        await api.createCompany({
+        const createRes = await api.createCompany({
           name,
           logoUrl,
           address,
@@ -134,7 +139,10 @@ export const CompanyAdminPage: React.FC = () => {
           adminLoginId,
           pin: pin.trim(),
         });
-        setSuccessMsg(`নতুন কোম্পানি "${name}" সফলভাবে যুক্ত হয়েছে!`);
+        if (createRes?.company?.id) {
+          setActiveCompanyId(createRes.company.id);
+        }
+        setSuccessMsg(`নতুন কোম্পানি "${name}" সফলভাবে যুক্ত হয়েছে এবং সক্রিয় হিসেবে সেট করা হয়েছে!`);
       }
       setIsModalOpen(false);
       await fetchCompanies();
@@ -156,7 +164,6 @@ export const CompanyAdminPage: React.FC = () => {
         status: 'active',
       });
       setSuccessMsg(`কোম্পানি "${c.name}" এর সাবস্ক্রিপশন ${toBengaliDigits(daysToAdd)} দিন বাড়ানো হয়েছে! নতুন মেয়াদ: ${newExpiry}`);
-      setExtendingCompany(null);
       await fetchCompanies();
     } catch (err: any) {
       setErrorMsg(err.message || 'সাবস্ক্রিপশন বৃদ্ধি ব্যর্থ হয়েছে।');
@@ -169,6 +176,9 @@ export const CompanyAdminPage: React.FC = () => {
     }
     try {
       await api.deleteCompany(c.id);
+      if (activeCompanyId === c.id) {
+        setActiveCompanyId(null);
+      }
       setSuccessMsg(`কোম্পানি "${c.name}" সফলভাবে মুছে ফেলা হয়েছে!`);
       await fetchCompanies();
     } catch (err: any) {
@@ -176,12 +186,119 @@ export const CompanyAdminPage: React.FC = () => {
     }
   };
 
-  // Preset logo helpers
-  const presetLogos = [
-    { label: 'ডিলাক্স বাস লোগো', url: 'https://images.unsplash.com/photo-1544620347-c4fd4a3d5957?w=120&auto=format&fit=crop&q=80' },
-    { label: 'এক্সপ্রেস কোচ লোগো', url: 'https://images.unsplash.com/photo-1570125909232-eb263c188f7e?w=120&auto=format&fit=crop&q=80' },
-    { label: 'রয়্যাল গ্রিন লোগো', url: 'https://images.unsplash.com/photo-1557223562-6c77ef16210f?w=120&auto=format&fit=crop&q=80' },
-  ];
+  const handleResetSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!resetModalCompany) return;
+    if (!newAdminLoginId.trim()) {
+      setResetErrorMsg('এডমিন লগইন আইডি দিন।');
+      return;
+    }
+    if (!newPin.trim() || newPin.trim().length < 4 || newPin.trim().length > 6) {
+      setResetErrorMsg('নতুন পিন অবশ্যই ৪ থেকে ৬ ডিজিটের হতে হবে।');
+      return;
+    }
+    setResetSubmitting(true);
+    setResetErrorMsg('');
+    try {
+      await api.updateCompany(resetModalCompany.id, {
+        adminLoginId: newAdminLoginId.trim(),
+        pin: newPin.trim(),
+      });
+      setSuccessMsg(`কোম্পানি "${resetModalCompany.name}" এর এডমিন আইডি (${newAdminLoginId}) ও পিন সফলভাবে রিসেট হয়েছে!`);
+      setResetModalCompany(null);
+      await fetchCompanies();
+    } catch (err: any) {
+      setResetErrorMsg(err.message || 'আইডি ও পিন রিসেট ব্যর্থ হয়েছে।');
+    } finally {
+      setResetSubmitting(false);
+    }
+  };
+
+  const [isProcessingLogo, setIsProcessingLogo] = useState<boolean>(false);
+
+  // Handle local file upload (mobile gallery / local storage / PC drive / camera)
+  const handleLogoFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (!file.type.startsWith('image/')) {
+      setErrorMsg('শুধুমাত্র ছবি ফাইল (PNG, JPG, JPEG, WEBP) আপলোড করা যাবে।');
+      return;
+    }
+
+    if (file.size > 25 * 1024 * 1024) {
+      setErrorMsg('ছবির সাইজ সর্বোচ্চ ২৫ মেগাবাইট (25MB) হতে পারবে।');
+      return;
+    }
+
+    setIsProcessingLogo(true);
+    setErrorMsg('');
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result !== 'string') {
+        setIsProcessingLogo(false);
+        return;
+      }
+
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const canvas = document.createElement('canvas');
+          const MAX_DIM = 256;
+          let width = img.width;
+          let height = img.height;
+
+          if (width > height) {
+            if (width > MAX_DIM) {
+              height = Math.round((height * MAX_DIM) / width);
+              width = MAX_DIM;
+            }
+          } else {
+            if (height > MAX_DIM) {
+              width = Math.round((width * MAX_DIM) / height);
+              height = MAX_DIM;
+            }
+          }
+
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            // Optional crisp background fill for PNGs
+            ctx.drawImage(img, 0, 0, width, height);
+            const isPng = file.type === 'image/png';
+            const compressed = canvas.toDataURL(isPng ? 'image/png' : 'image/jpeg', 0.88);
+            setLogoUrl(compressed);
+            setErrorMsg('');
+          } else {
+            setLogoUrl(reader.result as string);
+          }
+        } catch (err) {
+          console.error('Error compressing logo:', err);
+          setLogoUrl(reader.result as string);
+        } finally {
+          setIsProcessingLogo(false);
+        }
+      };
+
+      img.onerror = () => {
+        setIsProcessingLogo(false);
+        setErrorMsg('ছবি প্রসেস করতে সমস্যা হয়েছে। অন্য একটি ছবি নির্বাচন করুন।');
+      };
+
+      img.src = reader.result;
+    };
+
+    reader.onerror = () => {
+      setIsProcessingLogo(false);
+      setErrorMsg('ফাইলটি পড়তে সমস্যা হয়েছে। আবার চেষ্টা করুন।');
+    };
+
+    reader.readAsDataURL(file);
+    // Reset file input value so selecting the same file again triggers onChange
+    e.target.value = '';
+  };
 
   const today = getTodayDhakaDate();
 
@@ -476,8 +593,21 @@ export const CompanyAdminPage: React.FC = () => {
                 <div className="flex items-center gap-1">
                   <button
                     type="button"
+                    onClick={() => {
+                      setResetModalCompany(c);
+                      setNewAdminLoginId(c.adminLoginId || '');
+                      setNewPin('');
+                      setResetErrorMsg('');
+                    }}
+                    className="p-1.5 text-purple-600 hover:bg-purple-50 rounded-lg transition-colors cursor-pointer"
+                    title="এডমিন আইডি ও পিন রিসেট করুন"
+                  >
+                    <KeyRound className="w-4 h-4" />
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => openEditModal(c)}
-                    className="p-1.5 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
+                    className="p-1.5 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors cursor-pointer"
                     title="সম্পাদনা করুন"
                   >
                     <Edit className="w-4 h-4" />
@@ -485,13 +615,26 @@ export const CompanyAdminPage: React.FC = () => {
                   <button
                     type="button"
                     onClick={() => handleDelete(c)}
-                    className="p-1.5 text-rose-500 hover:bg-rose-50 rounded-lg transition-colors"
+                    className="p-1.5 text-rose-500 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
                     title="কোম্পানি মুছুন"
                   >
                     <Trash2 className="w-4 h-4" />
                   </button>
                 </div>
               </div>
+
+              {/* Enter Company Dashboard Context */}
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveCompanyId(c.id);
+                  setSuccessMsg(`"${c.name}" এর ড্যাশবোর্ডে প্রবেশ করেছেন। এখন আপনি এই কোম্পানির ট্রিপ, বাস ও কাউন্টার ব্যবস্থাপনা করতে পারবেন।`);
+                }}
+                className="w-full mt-2.5 px-3 py-2 bg-slate-900 hover:bg-purple-900 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer shadow-xs"
+              >
+                <ExternalLink className="w-3.5 h-3.5 text-purple-400" />
+                <span>কোম্পানি ড্যাশবোর্ডে প্রবেশ করুন</span>
+              </button>
             </div>
           );
         })}
@@ -545,36 +688,69 @@ export const CompanyAdminPage: React.FC = () => {
                   type="text"
                   value={name ?? ''}
                   onChange={(e) => setName(e.target.value)}
-                  placeholder="যেমন: শ্যামলী এন আর ট্রাভেলস, হানিফ এন্টারপ্রাইজ"
+                  placeholder="যেমন: ঢাকা এক্সপ্রেস, সোনার বাংলা ট্রাভেলস"
                   className="w-full px-3 py-2 bg-slate-50 border rounded-xl text-xs font-semibold outline-none focus:bg-white focus:ring-2 focus:ring-purple-500"
                   required
                 />
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  কোম্পানির নিজস্ব লোগো (Logo Image URL)
+                <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                  কোম্পানির নিজস্ব লোগো (গ্যালারি / ড্রাইভ / লোকাল স্টোরেজ থেকে আপলোড)
                 </label>
-                <input
-                  type="url"
-                  value={logoUrl ?? ''}
-                  onChange={(e) => setLogoUrl(e.target.value)}
-                  placeholder="https://example.com/logo.png"
-                  className="w-full px-3 py-2 bg-slate-50 border rounded-xl text-xs outline-none focus:bg-white focus:ring-2 focus:ring-purple-500"
-                />
-                {/* Preset quick logo selection */}
-                <div className="flex items-center gap-2 mt-2">
-                  <span className="text-[10px] text-slate-400">নমুনা লোগো:</span>
-                  {presetLogos.map((pl, idx) => (
-                    <button
-                      key={idx}
-                      type="button"
-                      onClick={() => setLogoUrl(pl.url)}
-                      className="text-[10px] px-2 py-0.5 rounded bg-purple-50 text-purple-700 hover:bg-purple-100 border border-purple-200 cursor-pointer"
+                <div className="flex items-center gap-3 p-3 bg-slate-50 border border-slate-200 rounded-2xl">
+                  {logoUrl ? (
+                    <div className="relative group shrink-0">
+                      <img
+                        src={logoUrl}
+                        alt="Company Logo"
+                        className="w-14 h-14 rounded-xl object-cover border-2 border-purple-500 shadow-sm bg-white"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setLogoUrl('')}
+                        className="absolute -top-1.5 -right-1.5 bg-rose-600 text-white rounded-full p-1 shadow-md hover:bg-rose-700 cursor-pointer"
+                        title="লোগো মুছে ফেলুন"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="w-14 h-14 rounded-xl border-2 border-dashed border-slate-300 flex items-center justify-center text-slate-400 bg-white shrink-0">
+                      <Building2 className="w-6 h-6" />
+                    </div>
+                  )}
+
+                  <div className="flex-1 min-w-0">
+                    <label
+                      htmlFor="company-logo-file-input"
+                      className={`inline-flex items-center gap-2 px-3 py-1.5 ${
+                        isProcessingLogo ? 'bg-purple-400' : 'bg-purple-600 hover:bg-purple-700'
+                      } text-white rounded-xl text-xs font-bold cursor-pointer transition-colors shadow-xs`}
                     >
-                      {pl.label}
-                    </button>
-                  ))}
+                      {isProcessingLogo ? (
+                        <>
+                          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                          <span>লোগো প্রসেস হচ্ছে...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Sparkles className="w-3.5 h-3.5" />
+                          <span>{logoUrl ? 'নতুন ছবি আপলোড করুন' : 'ডিভাইস বা ড্রাইভ থেকে লোগো নির্বাচন'}</span>
+                        </>
+                      )}
+                    </label>
+                    <input
+                      id="company-logo-file-input"
+                      type="file"
+                      accept="image/*"
+                      onChange={handleLogoFileUpload}
+                      className="hidden"
+                    />
+                    <div className="text-[10px] text-slate-500 mt-1">
+                      মোবাইল বা পিসির গ্যালারি/ড্রাইভ থেকে যে কোনো ছবি/লোগো সিলেক্ট করুন (PNG, JPG, WEBP)
+                    </div>
+                  </div>
                 </div>
               </div>
 
@@ -587,7 +763,7 @@ export const CompanyAdminPage: React.FC = () => {
                     type="text"
                     value={adminLoginId ?? ''}
                     onChange={(e) => setAdminLoginId(e.target.value)}
-                    placeholder="যেমন: shyamoli01"
+                    placeholder="যেমন: admin01, transport01"
                     className="w-full px-3 py-2 bg-slate-50 border rounded-xl text-xs font-mono font-bold outline-none focus:bg-white focus:ring-2 focus:ring-purple-500"
                     required
                   />
@@ -687,6 +863,91 @@ export const CompanyAdminPage: React.FC = () => {
                 >
                   <CheckCircle className="w-4 h-4" />
                   <span>{editingCompany ? 'আপডেট সংরক্ষণ' : 'কোম্পানি তৈরি করুন'}</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Quick Reset Admin ID & PIN Modal */}
+      {resetModalCompany && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-200">
+          <div className="bg-white w-full max-w-md rounded-3xl shadow-2xl border border-slate-200 overflow-hidden flex flex-col">
+            <div className="px-6 py-4 bg-slate-900 text-white flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-purple-500/20 text-purple-400 flex items-center justify-center font-bold">
+                  <KeyRound className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-sm">এডমিন লগইন আইডি ও পিন রিসেট</h3>
+                  <div className="text-[11px] text-slate-300">{resetModalCompany.name}</div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setResetModalCompany(null)}
+                className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {resetErrorMsg && (
+              <div className="m-4 p-3 bg-rose-50 border border-rose-200 text-rose-800 text-xs font-semibold rounded-2xl flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                <span>{resetErrorMsg}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleResetSubmit} className="p-6 space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  কোম্পানি এডমিন লগইন আইডি *
+                </label>
+                <input
+                  type="text"
+                  value={newAdminLoginId}
+                  onChange={(e) => setNewAdminLoginId(e.target.value)}
+                  placeholder="যেমন: chandra01"
+                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-xs font-mono font-bold outline-none focus:bg-white focus:ring-2 focus:ring-purple-500"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  নতুন ৪-৬ ডিজিট সিকিউর পিন *
+                </label>
+                <input
+                  type="password"
+                  maxLength={6}
+                  value={newPin}
+                  onChange={(e) => setNewPin(e.target.value)}
+                  placeholder="যেমন: 1234"
+                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-xs font-mono font-bold outline-none focus:bg-white focus:ring-2 focus:ring-purple-500"
+                  required
+                />
+                <div className="text-[10px] text-slate-500 mt-1">
+                  এই নতুন আইডি ও পিন দিয়ে কোম্পানি এডমিন তার প্যানেলে লগইন করতে পারবে।
+                </div>
+              </div>
+
+              <div className="pt-3 border-t border-slate-200 flex items-center justify-end gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => setResetModalCompany(null)}
+                  className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold cursor-pointer"
+                >
+                  বাতিল
+                </button>
+                <button
+                  type="submit"
+                  disabled={resetSubmitting}
+                  className="px-5 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-xl text-xs font-bold shadow-md shadow-purple-600/30 flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Lock className="w-3.5 h-3.5" />
+                  <span>{resetSubmitting ? 'সংরক্ষণ হচ্ছে...' : 'আইডি ও পিন আপডেট করুন'}</span>
                 </button>
               </div>
             </form>

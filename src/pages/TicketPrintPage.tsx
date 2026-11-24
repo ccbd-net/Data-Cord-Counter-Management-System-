@@ -1,7 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { api } from '../services/api.ts';
 import type { Booking } from '../types/index.ts';
 import { ThermalTicketModal } from '../components/ThermalTicketModal.tsx';
+import { PrinterSettingsModal } from '../components/PrinterSettingsModal.tsx';
+import { useDataSync } from '../hooks/useDataSync.ts';
 import { formatTaka, toBengaliDigits, formatBengaliDateTime, getTodayDhakaDate } from '../utils/formatters.ts';
 import {
   Printer,
@@ -22,6 +24,7 @@ export const TicketPrintPage: React.FC = () => {
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [selectedBookingForPrint, setSelectedBookingForPrint] = useState<Booking | null>(null);
+  const [isPrinterModalOpen, setIsPrinterModalOpen] = useState<boolean>(false);
 
   const fetchBookings = async () => {
     setLoading(true);
@@ -38,6 +41,13 @@ export const TicketPrintPage: React.FC = () => {
   useEffect(() => {
     fetchBookings();
   }, [date]);
+
+  // Real-time synchronization
+  useDataSync(
+    useCallback(() => {
+      fetchBookings();
+    }, [date])
+  );
 
   // Filter bookings by search term (ticketNo, phone, passengerName, seatNumber)
   const filteredBookings = bookings.filter((b) => {
@@ -66,8 +76,17 @@ export const TicketPrintPage: React.FC = () => {
           </p>
         </div>
 
-        {/* Date Selector & Refresh */}
+        {/* Date Selector, Printer Config & Refresh */}
         <div className="flex items-center gap-2.5">
+          <button
+            type="button"
+            onClick={() => setIsPrinterModalOpen(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition-all shadow-xs"
+          >
+            <Printer className="w-4 h-4 text-emerald-400" />
+            <span>এড / সিলেক্ট প্রিন্টার</span>
+          </button>
+
           <div className="flex items-center gap-2 bg-slate-50 px-3 py-1.5 rounded-xl border border-slate-300 text-xs font-semibold">
             <Calendar className="w-4 h-4 text-emerald-600" />
             <input
@@ -232,6 +251,12 @@ export const TicketPrintPage: React.FC = () => {
           onPrinted={fetchBookings}
         />
       )}
+
+      {/* Printer Settings Modal */}
+      <PrinterSettingsModal
+        isOpen={isPrinterModalOpen}
+        onClose={() => setIsPrinterModalOpen(false)}
+      />
     </div>
   );
 };

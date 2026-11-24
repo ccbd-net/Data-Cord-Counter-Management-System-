@@ -1,412 +1,436 @@
 import { jsPDF } from 'jspdf';
+import html2canvas from 'html2canvas';
 import type { Booking, Schedule, SystemSettings } from '../types/index.ts';
 
 /**
- * Downloads high quality Bus Ticket PDF
+ * Cleanly combines UP and DOWN route names into a single sequential result route
+ * Example: "মাদারীপুর - ঢাকা" + "ঢাকা - মাদারীপুর" => "মাদারীপুর - ঢাকা - মাদারীপুর"
+ * Example: "কালকিনি - গুলিস্তান" + "কদমতলী - মাদারীপুর" => "কালকিনি - গুলিস্তান - কদমতলী - মাদারীপুর"
  */
-export function downloadTicketPDF(booking: Booking, settings?: SystemSettings) {
-  const doc = new jsPDF({
-    unit: 'mm',
-    format: [80, 180], // 80mm thermal/slip receipt width
-  });
+export function combineRouteNames(upRouteName?: string, downRouteName?: string): string {
+  if (!upRouteName && !downRouteName) return '-';
+  if (!upRouteName) return downRouteName || '-';
+  if (!downRouteName) return upRouteName || '-';
 
-  const company = settings?.companyName || 'Cloud Counter Management';
-  const subTitle = settings?.subTitle || 'কাউন্টার বুকিং ও ট্রিপ ইনফরমেশন';
-  const hotline = settings?.hotline || '';
+  const parseStops = (r: string) =>
+    r
+      .split(/[-–—⇌→+]/)
+      .map((s) => s.trim())
+      .filter(Boolean);
 
-  let y = 10;
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(13);
-  doc.text(company, 40, y, { align: 'center' });
+  const upStops = parseStops(upRouteName);
+  const downStops = parseStops(downRouteName);
 
-  y += 5;
-  doc.setFont('helvetica', 'normal');
-  doc.setFontSize(8);
-  doc.text(subTitle, 40, y, { align: 'center' });
+  if (upStops.length === 0) return downRouteName;
+  if (downStops.length === 0) return upRouteName;
 
-  if (hotline) {
-    y += 4;
-    doc.text(`Hotline: ${hotline}`, 40, y, { align: 'center' });
+  const combined: string[] = [...upStops];
+  for (let i = 0; i < downStops.length; i++) {
+    const stop = downStops[i];
+    // Skip duplicate connecting pivot station
+    if (i === 0 && combined[combined.length - 1].toLowerCase() === stop.toLowerCase()) {
+      continue;
+    }
+    combined.push(stop);
   }
 
-  y += 4;
-  doc.setFontSize(9);
-  doc.setFont('helvetica', 'bold');
-  doc.text('*** PASSENGER TICKET COPY ***', 40, y, { align: 'center' });
-
-  y += 3;
-  doc.setLineWidth(0.3);
-  doc.line(6, y, 74, y);
-
-  // Ticket Meta
-  y += 5;
-  doc.setFontSize(8);
-  doc.setFont('helvetica', 'bold');
-  doc.text('Ticket No:', 6, y);
-  doc.setFont('helvetica', 'bold');
-  doc.text(booking.ticketNo, 74, y, { align: 'right' });
-
-  y += 4.5;
-  doc.setFont('helvetica', 'normal');
-  doc.text('Trip No:', 6, y);
-  doc.text(booking.tripNo || '-', 74, y, { align: 'right' });
-
-  y += 4.5;
-  doc.text('Date:', 6, y);
-  doc.text(booking.tripDate, 74, y, { align: 'right' });
-
-  y += 4.5;
-  doc.text('Departure Time:', 6, y);
-  doc.setFont('helvetica', 'bold');
-  doc.text(booking.tripTime, 74, y, { align: 'right' });
-
-  y += 4.5;
-  doc.setFont('helvetica', 'normal');
-  doc.text('Bus Reg No:', 6, y);
-  doc.setFont('helvetica', 'bold');
-  doc.text(booking.vehicleRegNo, 74, y, { align: 'right' });
-
-  y += 4.5;
-  doc.setFont('helvetica', 'normal');
-  doc.text('Route:', 6, y);
-  doc.text(booking.routeName, 74, y, { align: 'right' });
-
-  y += 3;
-  doc.line(6, y, 74, y);
-
-  // Passenger Details
-  y += 5;
-  doc.text('Passenger:', 6, y);
-  doc.setFont('helvetica', 'bold');
-  doc.text(booking.passengerName, 74, y, { align: 'right' });
-
-  y += 4.5;
-  doc.setFont('helvetica', 'normal');
-  doc.text('Mobile Phone:', 6, y);
-  doc.text(booking.passengerPhone || 'N/A', 74, y, { align: 'right' });
-
-  y += 4.5;
-  doc.text('Boarding Point:', 6, y);
-  doc.text(booking.boardingPoint, 74, y, { align: 'right' });
-
-  y += 4.5;
-  doc.text('Destination:', 6, y);
-  doc.text(booking.destination, 74, y, { align: 'right' });
-
-  y += 3;
-  doc.line(6, y, 74, y);
-
-  // Seats & Fare
-  y += 5;
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(10);
-  doc.text('Seat(s):', 6, y);
-  doc.text(booking.seatNumbers.join(', '), 74, y, { align: 'right' });
-
-  y += 5;
-  doc.setFontSize(8);
-  doc.setFont('helvetica', 'normal');
-  doc.text(`Total Seats (${booking.totalSeats}):`, 6, y);
-  doc.text(`Tk ${booking.farePerSeat} each`, 74, y, { align: 'right' });
-
-  y += 5;
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(11);
-  doc.text('TOTAL PAID:', 6, y);
-  doc.text(`Tk ${booking.totalFare}`, 74, y, { align: 'right' });
-
-  y += 3;
-  doc.setLineWidth(0.3);
-  doc.line(6, y, 74, y);
-
-  // Counter & Issue Info
-  y += 4.5;
-  doc.setFontSize(7.5);
-  doc.setFont('helvetica', 'normal');
-  doc.text(`Issued By Counter: ${booking.counterName} (${booking.counterCode})`, 40, y, { align: 'center' });
-
-  y += 4;
-  doc.text(`Operator: ${booking.bookedByUserName}`, 40, y, { align: 'center' });
-
-  y += 4;
-  doc.text(`Issue Time: ${new Date(booking.bookedAt).toLocaleString()}`, 40, y, { align: 'center' });
-
-  y += 6;
-  doc.setFontSize(6.5);
-  doc.text('* Please arrive at boarding counter 15 mins prior to departure.', 40, y, { align: 'center' });
-  y += 3.5;
-  doc.text('* Keep ticket safely during travel. Have a safe journey!', 40, y, { align: 'center' });
-
-  doc.save(`Ticket-${booking.ticketNo}.pdf`);
+  return combined.join(' - ');
 }
 
 /**
- * Downloads Official Bus Trip Waybill / Passenger Manifest PDF
+ * Calculates time difference between Up and Down departure times
+ * Example: Up "07:30 PM", Down "08:30 AM" (Next day) => "১৩ ঘণ্টা ০০ মি."
  */
-export function downloadWaybillPDF(schedule: Schedule, bookings: Booking[], settings?: SystemSettings) {
-  const doc = new jsPDF({
-    unit: 'mm',
-    format: 'a4',
-    orientation: 'portrait',
+export function calculateTimeDifference(
+  timeUp?: string,
+  timeDown?: string,
+  isNightHold?: boolean
+): string {
+  if (!timeUp || !timeDown) return '-';
+
+  const parseToMinutes = (timeStr: string): number | null => {
+    try {
+      const cleaned = timeStr.trim().toUpperCase();
+      const match12 = cleaned.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)?$/);
+      if (match12) {
+        let hours = parseInt(match12[1], 10);
+        const mins = parseInt(match12[2], 10);
+        const ampm = match12[3];
+        if (ampm === 'PM' && hours < 12) hours += 12;
+        if (ampm === 'AM' && hours === 12) hours = 0;
+        return hours * 60 + mins;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  };
+
+  const mUp = parseToMinutes(timeUp);
+  const mDown = parseToMinutes(timeDown);
+
+  if (mUp === null || mDown === null) return '-';
+
+  let diff = mDown - mUp;
+  if (isNightHold || diff < 0) {
+    // Crosses over midnight / next day
+    diff += 24 * 60;
+  }
+
+  const hours = Math.floor(diff / 60);
+  const minutes = diff % 60;
+
+  const toBn = (n: number) => {
+    const bn = ['০', '১', '২', '৩', '৪', '৫', '৬', '৭', '৮', '৯'];
+    return String(n).replace(/\d/g, (d) => bn[parseInt(d, 10)]);
+  };
+
+  if (hours === 0 && minutes === 0) return '০ মিনিট';
+  if (hours === 0) return `${toBn(minutes)} মিনিট`;
+  if (minutes === 0) return `${toBn(hours)} ঘণ্টা`;
+  return `${toBn(hours)} ঘণ্টা ${toBn(minutes)} মি.`;
+}
+
+/**
+ * Converts a Bengali number
+ */
+export function toBnDigits(num: number | string): string {
+  const bn = ['০', '১', '২', '৩', '৪', '৫', '৬', '৭', '৮', '৯'];
+  return String(num).replace(/\d/g, (d) => bn[parseInt(d, 10)]);
+}
+
+/**
+ * Downloads a DOM element as a crisp PDF using html2canvas
+ * 100% supports Bengali Unicode script, barcodes, logos and styling!
+ */
+export async function downloadElementAsPDF(
+  elementId: string,
+  fileName: string,
+  orientation: 'portrait' | 'landscape' = 'portrait',
+  paperFormat: 'a4' | [number, number] = 'a4'
+) {
+  const element = document.getElementById(elementId);
+  if (!element) {
+    throw new Error(`Element #${elementId} not found for PDF export.`);
+  }
+
+  // Generate high-resolution canvas
+  const canvas = await html2canvas(element, {
+    scale: 2.5,
+    useCORS: true,
+    logging: false,
+    backgroundColor: '#ffffff',
+    windowWidth: element.scrollWidth,
   });
 
-  const company = settings?.companyName || 'Cloud Counter Management';
-  const subTitle = settings?.subTitle || 'কাউন্টার বুকিং ও ট্রিপ ইনফরমেশন';
+  const imgData = canvas.toDataURL('image/jpeg', 0.95);
 
-  // Header Box
-  doc.setFillColor(15, 23, 42); // slate-900
-  doc.rect(10, 10, 190, 22, 'F');
+  const doc = new jsPDF({
+    orientation,
+    unit: 'mm',
+    format: paperFormat,
+  });
 
-  doc.setTextColor(255, 255, 255);
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(15);
-  doc.text(company, 105, 18, { align: 'center' });
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
 
-  doc.setFontSize(9);
-  doc.setFont('helvetica', 'normal');
-  doc.text(`${subTitle} — TRIP WAYBILL & PASSENGER MANIFEST (ওয়েবিল)`, 105, 26, { align: 'center' });
+  const imgWidth = pageWidth - 10;
+  const imgHeight = (canvas.height * imgWidth) / canvas.width;
 
-  // Reset Text Color
-  doc.setTextColor(15, 23, 42);
-
-  // Trip Info Grid
-  let y = 38;
-  doc.setFillColor(248, 250, 252);
-  doc.roundedRect(10, y, 190, 26, 2, 2, 'FD');
-
-  doc.setFontSize(8.5);
-  // Column 1
-  doc.setFont('helvetica', 'bold');
-  doc.text('Trip No:', 14, y + 6);
-  doc.setFont('helvetica', 'normal');
-  doc.text(schedule.tripNo || '-', 38, y + 6);
-
-  doc.setFont('helvetica', 'bold');
-  doc.text('Date & Time:', 14, y + 12);
-  doc.setFont('helvetica', 'normal');
-  doc.text(`${schedule.date} at ${schedule.departureTime}`, 38, y + 12);
-
-  doc.setFont('helvetica', 'bold');
-  doc.text('Route:', 14, y + 18);
-  doc.setFont('helvetica', 'normal');
-  doc.text(schedule.routeName, 38, y + 18);
-
-  // Column 2
-  doc.setFont('helvetica', 'bold');
-  doc.text('Bus Reg No:', 105, y + 6);
-  doc.setFont('helvetica', 'normal');
-  doc.text(schedule.vehicleRegNo, 135, y + 6);
-
-  doc.setFont('helvetica', 'bold');
-  doc.text('Owner Name:', 105, y + 12);
-  doc.setFont('helvetica', 'normal');
-  doc.text(schedule.vehicleOwnerName || 'N/A', 135, y + 12);
-
-  doc.setFont('helvetica', 'bold');
-  doc.text('Supervisor:', 105, y + 18);
-  doc.setFont('helvetica', 'normal');
-  doc.text(`${schedule.supervisor || 'N/A'} (${schedule.supervisorPhone || 'No Phone'})`, 135, y + 18);
-
-  // Summary Badges
-  y += 31;
-  const totalBookedSeats = bookings.reduce((sum, b) => sum + (b.status === 'booked' ? b.seatNumbers.length : 0), 0);
-  const totalRevenue = bookings.reduce((sum, b) => sum + (b.status === 'booked' ? b.totalFare : 0), 0);
-
-  doc.setFontSize(9);
-  doc.setFont('helvetica', 'bold');
-  doc.text(`Capacity: ${schedule.seatCapacity} Seats`, 14, y);
-  doc.text(`Booked Seats: ${totalBookedSeats} / ${schedule.seatCapacity}`, 65, y);
-  doc.text(`Available Seats: ${schedule.seatCapacity - totalBookedSeats}`, 120, y);
-  doc.text(`Total Collection: Tk ${totalRevenue}`, 160, y);
-
-  // Passenger Manifest Table Header
-  y += 6;
-  doc.setFillColor(30, 41, 59);
-  doc.rect(10, y, 190, 7, 'F');
-  doc.setTextColor(255, 255, 255);
-  doc.setFontSize(8);
-  doc.setFont('helvetica', 'bold');
-
-  doc.text('SL', 13, y + 5);
-  doc.text('Seat(s)', 22, y + 5);
-  doc.text('Ticket No', 42, y + 5);
-  doc.text('Passenger Name', 70, y + 5);
-  doc.text('Mobile Phone', 110, y + 5);
-  doc.text('Boarding', 138, y + 5);
-  doc.text('Counter', 168, y + 5);
-  doc.text('Fare (Tk)', 188, y + 5, { align: 'right' });
-
-  // Rows
-  y += 7;
-  doc.setTextColor(30, 41, 59);
-  doc.setFont('helvetica', 'normal');
-  doc.setFontSize(7.5);
-
-  let sl = 1;
-  const activeBookings = bookings.filter((b) => b.status === 'booked');
-
-  if (activeBookings.length === 0) {
-    doc.text('No booked passengers recorded for this trip yet.', 105, y + 8, { align: 'center' });
-    y += 16;
+  if (imgHeight > pageHeight - 10) {
+    // If it exceeds one page, fit proportionally or scale
+    const scaledWidth = ((pageHeight - 10) * canvas.width) / canvas.height;
+    const xOffset = (pageWidth - scaledWidth) / 2;
+    doc.addImage(imgData, 'JPEG', xOffset, 5, scaledWidth, pageHeight - 10);
   } else {
-    for (const b of activeBookings) {
-      if (y > 260) {
-        doc.addPage();
-        y = 15;
-      }
-
-      // Alternating row background
-      if (sl % 2 === 0) {
-        doc.setFillColor(248, 250, 252);
-        doc.rect(10, y, 190, 6, 'F');
-      }
-
-      doc.text(String(sl), 13, y + 4.2);
-      doc.setFont('helvetica', 'bold');
-      doc.text(b.seatNumbers.join(','), 22, y + 4.2);
-      doc.setFont('helvetica', 'normal');
-      doc.text(b.ticketNo, 42, y + 4.2);
-      doc.text(b.passengerName.slice(0, 20), 70, y + 4.2);
-      doc.text(b.passengerPhone || 'N/A', 110, y + 4.2);
-      doc.text(b.boardingPoint.slice(0, 15), 138, y + 4.2);
-      doc.text(b.counterCode || b.counterName.slice(0, 8), 168, y + 4.2);
-      doc.setFont('helvetica', 'bold');
-      doc.text(String(b.totalFare), 188, y + 4.2, { align: 'right' });
-      doc.setFont('helvetica', 'normal');
-
-      y += 6;
-      sl++;
-    }
+    const xOffset = (pageWidth - imgWidth) / 2;
+    doc.addImage(imgData, 'JPEG', xOffset, 5, imgWidth, imgHeight);
   }
 
-  // Counter-wise Breakdown Box
-  if (y > 235) {
-    doc.addPage();
-    y = 15;
-  }
-
-  y += 4;
-  doc.setDrawColor(203, 213, 225);
-  doc.setFillColor(241, 245, 249);
-  doc.roundedRect(10, y, 190, 20, 1, 1, 'FD');
-
-  doc.setFontSize(8.5);
-  doc.setFont('helvetica', 'bold');
-  doc.text('Counter Collection Summary:', 14, y + 5);
-
-  const counterTotals = new Map<string, { seats: number; amount: number }>();
-  for (const b of activeBookings) {
-    const key = b.counterName || 'Direct';
-    if (!counterTotals.has(key)) counterTotals.set(key, { seats: 0, amount: 0 });
-    const c = counterTotals.get(key)!;
-    c.seats += b.seatNumbers.length;
-    c.amount += b.totalFare;
-  }
-
-  let cx = 14;
-  let cy = y + 10;
-  doc.setFontSize(7.5);
-  doc.setFont('helvetica', 'normal');
-
-  for (const [cName, data] of counterTotals.entries()) {
-    doc.text(`* ${cName}: ${data.seats} Seats — Tk ${data.amount}`, cx, cy);
-    cx += 60;
-    if (cx > 140) {
-      cx = 14;
-      cy += 4.5;
-    }
-  }
-
-  // Signatures Section
-  y = Math.max(y + 28, 255);
-  doc.setLineWidth(0.3);
-  doc.setDrawColor(100, 116, 139);
-
-  doc.line(16, y, 66, y);
-  doc.line(78, y, 128, y);
-  doc.line(140, y, 190, y);
-
-  doc.setFontSize(8);
-  doc.setFont('helvetica', 'bold');
-  doc.text('Supervisor Signature', 41, y + 4, { align: 'center' });
-  doc.text('Driver Signature', 103, y + 4, { align: 'center' });
-  doc.text('Counter In-charge / Auditor', 165, y + 4, { align: 'center' });
-
-  doc.save(`Waybill-${schedule.tripNo || schedule.id}-${schedule.date}.pdf`);
+  doc.save(fileName);
 }
 
 /**
- * Downloads Daily Trip Schedule Summary PDF
+ * Downloads high quality Bus Ticket PDF with company logo & pure Bengali
  */
-export function downloadDailyTripsPDF(schedules: Schedule[], date: string, settings?: SystemSettings) {
-  const doc = new jsPDF({
-    unit: 'mm',
-    format: 'a4',
-    orientation: 'landscape',
-  });
-
-  const company = settings?.companyName || 'Cloud Counter Management';
-
-  // Title
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(16);
-  doc.text(company, 148, 15, { align: 'center' });
-
-  doc.setFontSize(10);
-  doc.setFont('helvetica', 'normal');
-  doc.text(`Daily Trips & Vehicle Schedule Report — Date: ${date}`, 148, 22, { align: 'center' });
-
-  let y = 30;
-  doc.setFillColor(30, 41, 59);
-  doc.rect(10, y, 277, 8, 'F');
-  doc.setTextColor(255, 255, 255);
-  doc.setFontSize(8.5);
-  doc.setFont('helvetica', 'bold');
-
-  doc.text('Trip No', 14, y + 5.5);
-  doc.text('Time', 38, y + 5.5);
-  doc.text('Vehicle Reg', 62, y + 5.5);
-  doc.text('Owner Name', 95, y + 5.5);
-  doc.text('Route', 138, y + 5.5);
-  doc.text('Supervisor', 188, y + 5.5);
-  doc.text('Seats', 230, y + 5.5);
-  doc.text('Fare', 250, y + 5.5);
-  doc.text('Status', 270, y + 5.5);
-
-  y += 8;
-  doc.setTextColor(30, 41, 59);
-  doc.setFont('helvetica', 'normal');
-  doc.setFontSize(8);
-
-  let sl = 1;
-  for (const s of schedules) {
-    if (y > 185) {
-      doc.addPage();
-      y = 15;
+export async function downloadTicketPDF(booking: Booking, companyName?: string) {
+  const element = document.getElementById('printable-thermal-ticket');
+  if (element) {
+    try {
+      await downloadElementAsPDF(
+        'printable-thermal-ticket',
+        `Ticket-${booking.ticketNo}.pdf`,
+        'portrait',
+        [80, 200]
+      );
+      return;
+    } catch (err) {
+      console.warn('Canvas PDF failed, falling back to print window:', err);
     }
-
-    if (sl % 2 === 0) {
-      doc.setFillColor(248, 250, 252);
-      doc.rect(10, y, 277, 6.5, 'F');
-    }
-
-    doc.setFont('helvetica', 'bold');
-    doc.text(s.tripNo, 14, y + 4.5);
-    doc.setFont('helvetica', 'normal');
-    doc.text(s.departureTime, 38, y + 4.5);
-    doc.setFont('helvetica', 'bold');
-    doc.text(s.vehicleRegNo, 62, y + 4.5);
-    doc.setFont('helvetica', 'normal');
-    doc.text((s.vehicleOwnerName || 'N/A').slice(0, 20), 95, y + 4.5);
-    doc.text(s.routeName.slice(0, 28), 138, y + 4.5);
-    doc.text((s.supervisor || 'N/A').slice(0, 18), 188, y + 4.5);
-    doc.text(`${s.totalBookedSeats || 0} / ${s.seatCapacity}`, 230, y + 4.5);
-    doc.text(`Tk ${s.fare}`, 250, y + 4.5);
-    doc.text(s.status, 270, y + 4.5);
-
-    y += 6.5;
-    sl++;
   }
 
-  doc.save(`DailyTrips-${date}.pdf`);
+  // Fallback: Trigger print dialog which allows "Save as PDF" with 100% vector Bangla text
+  window.print();
 }
+
+/**
+ * Printable Popup Window Helper
+ * Opens dedicated isolated window with Hind Siliguri font and triggers window.print()
+ * Fully optimized for POS Thermal Printers (58mm, 80mm) and A4 / Letter PDF export.
+ */
+export function openPrintWindow(
+  htmlContent: string,
+  title: string = 'প্রিন্ট ডকুমেন্ট',
+  paperSize: '58mm' | '80mm' | 'A4' | 'A4-landscape' = '58mm'
+) {
+  // Remove any existing print iframe
+  const existing = document.getElementById('zb-print-iframe');
+  if (existing) {
+    existing.remove();
+  }
+
+  const iframe = document.createElement('iframe');
+  iframe.id = 'zb-print-iframe';
+  iframe.style.position = 'fixed';
+  iframe.style.right = '0';
+  iframe.style.bottom = '0';
+  iframe.style.width = '0px';
+  iframe.style.height = '0px';
+  iframe.style.border = 'none';
+  iframe.style.visibility = 'hidden';
+  document.body.appendChild(iframe);
+
+  let pageCss = '';
+  let containerWidth = '54mm';
+
+  if (paperSize === '58mm') {
+    pageCss = '@page { size: 58mm auto; margin: 0.5mm; }';
+    containerWidth = '54mm';
+  } else if (paperSize === '80mm') {
+    pageCss = '@page { size: 80mm auto; margin: 1mm; }';
+    containerWidth = '74mm';
+  } else if (paperSize === 'A4-landscape') {
+    pageCss = '@page { size: A4 landscape; margin: 8mm; }';
+    containerWidth = '100%';
+  } else {
+    pageCss = '@page { size: A4 portrait; margin: 8mm; }';
+    containerWidth = '100%';
+  }
+
+  const doc = iframe.contentWindow?.document;
+  if (!doc) {
+    window.print();
+    return;
+  }
+
+  doc.open();
+  doc.write(`
+    <!DOCTYPE html>
+    <html lang="bn">
+      <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>${title}</title>
+        <style>
+          @import url('https://fonts.googleapis.com/css2?family=Hind+Siliguri:wght@400;500;600;700;800&display=swap');
+          ${pageCss}
+          
+          * { 
+            box-sizing: border-box; 
+            margin: 0; 
+            padding: 0; 
+          }
+          
+          body {
+            font-family: 'Hind Siliguri', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            color: #000000;
+            background: #ffffff;
+            font-size: 11px;
+            line-height: 1.35;
+            -webkit-print-color-adjust: exact !important;
+            print-color-adjust: exact !important;
+          }
+
+          .print-wrapper {
+            width: ${containerWidth};
+            max-width: 100%;
+            margin: 0 auto;
+            padding: 4px;
+            background: #ffffff;
+          }
+
+          /* Thermal Receipt Structured Table Rules */
+          table.receipt-table {
+            width: 100% !important;
+            border-collapse: collapse !important;
+            margin: 0 !important;
+            table-layout: fixed !important;
+          }
+          
+          table.receipt-table td {
+            padding: 3px 0 !important;
+            vertical-align: middle !important;
+            border: none !important;
+            font-size: 11px !important;
+            line-height: 1.3 !important;
+          }
+
+          table.receipt-table td.lbl {
+            width: 42% !important;
+            text-align: left !important;
+            color: #1e293b !important;
+            font-weight: 600 !important;
+            white-space: nowrap !important;
+          }
+
+          table.receipt-table td.val {
+            width: 58% !important;
+            text-align: right !important;
+            color: #000000 !important;
+            font-weight: 800 !important;
+            word-break: break-word !important;
+          }
+
+          /* General Report Table Rules */
+          table.report-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 8px;
+            margin-bottom: 8px;
+          }
+
+          table.report-table th, 
+          table.report-table td {
+            border: 1px solid #000000 !important;
+            padding: 5px 6px;
+            font-size: 10.5px;
+            text-align: left;
+          }
+
+          table.report-table th {
+            background-color: #f1f5f9 !important;
+            font-weight: bold;
+            color: #0f172a;
+          }
+
+          /* Helpers */
+          .text-center { text-align: center !important; }
+          .text-left { text-align: left !important; }
+          .text-right { text-align: right !important; }
+          .font-bold { font-weight: 700 !important; }
+          .font-black { font-weight: 800 !important; }
+          .uppercase { text-transform: uppercase; }
+          
+          .border-box {
+            border: 1.5px solid #000000 !important;
+            border-radius: 5px !important;
+            padding: 6px 8px !important;
+            margin-bottom: 6px !important;
+            background: #ffffff !important;
+          }
+
+          .dashed-box {
+            border: 1.5px dashed #000000 !important;
+            border-radius: 5px !important;
+            padding: 6px 8px !important;
+            margin-bottom: 6px !important;
+            background: #ffffff !important;
+          }
+
+          .tear-divider {
+            text-align: center !important;
+            border-top: 2px dashed #000000 !important;
+            margin: 14px 0 12px 0 !important;
+            padding-top: 6px !important;
+            font-size: 10px !important;
+            font-weight: 800 !important;
+            letter-spacing: 1px !important;
+          }
+
+          @media print {
+            body {
+              width: 100% !important;
+              margin: 0 !important;
+              padding: 0 !important;
+              background: #ffffff !important;
+            }
+            .no-print {
+              display: none !important;
+            }
+            .print-wrapper {
+              width: ${containerWidth} !important;
+              max-width: ${containerWidth} !important;
+              margin: 0 auto !important;
+              padding: 0 !important;
+            }
+            .receipt-content {
+              border: 1.5px solid #000000 !important;
+              box-shadow: none !important;
+            }
+          }
+        </style>
+      </head>
+      <body>
+        <div class="print-wrapper">
+          ${htmlContent}
+        </div>
+      </body>
+    </html>
+  `);
+  doc.close();
+
+  setTimeout(() => {
+    try {
+      iframe.contentWindow?.focus();
+      iframe.contentWindow?.print();
+    } catch {
+      window.print();
+    }
+  }, 450);
+}
+
+/**
+ * Downloads Daily Trip Schedule Summary PDF with Bengali support
+ */
+export async function downloadDailyTripsPDF(
+  schedules: Schedule[],
+  date: string,
+  settings?: SystemSettings
+) {
+  const el = document.getElementById('printable-trip-report');
+  if (el) {
+    try {
+      await downloadElementAsPDF('printable-trip-report', `DailyTrips-${date}.pdf`, 'landscape', 'a4');
+      return;
+    } catch (err) {
+      console.warn('Canvas PDF export failed, falling back to window.print():', err);
+    }
+  }
+  window.print();
+}
+
+/**
+ * Downloads Waybill PDF with Bengali support
+ */
+export async function downloadWaybillPDF(
+  schedule: Schedule,
+  bookings: Booking[],
+  settings?: SystemSettings
+) {
+  const el = document.getElementById('printable-supervisor-waybill');
+  if (el) {
+    try {
+      await downloadElementAsPDF(
+        'printable-supervisor-waybill',
+        `Waybill-${schedule.tripNo}-${schedule.date}.pdf`,
+        'portrait',
+        'a4'
+      );
+      return;
+    } catch (err) {
+      console.warn('Canvas PDF export failed, falling back to window.print():', err);
+    }
+  }
+  window.print();
+}
+

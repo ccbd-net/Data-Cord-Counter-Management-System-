@@ -147,10 +147,10 @@ export const DigitalClockPicker: React.FC<DigitalClockPickerProps> = ({
       {isOpen && (
         <>
           <div
-            className="fixed inset-0 z-40"
+            className="fixed inset-0 z-50 bg-black/30 sm:bg-transparent"
             onClick={() => setIsOpen(false)}
           />
-          <div className="absolute z-50 mt-2 left-0 right-0 sm:right-auto sm:w-96 bg-slate-900 border-2 border-emerald-500/50 rounded-3xl p-5 text-white shadow-2xl backdrop-blur-md animate-in fade-in zoom-in-95 duration-150">
+          <div className="fixed inset-x-3 top-1/2 -translate-y-1/2 sm:translate-y-0 sm:inset-x-auto sm:top-auto sm:absolute z-50 sm:mt-2 sm:left-0 sm:w-96 max-w-md mx-auto bg-slate-900 border-2 border-emerald-500/50 rounded-3xl p-5 text-white shadow-2xl backdrop-blur-md">
             {/* Digital LED Display Header */}
             <div className="bg-slate-950 p-4 rounded-2xl border border-slate-800 shadow-inner flex flex-col items-center justify-center mb-4 relative overflow-hidden">
               <div className="absolute top-2 left-3 flex items-center gap-1.5">

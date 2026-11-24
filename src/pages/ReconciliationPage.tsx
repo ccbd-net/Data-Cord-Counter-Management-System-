@@ -4,6 +4,12 @@ import { api } from '../services/api.ts';
 import type { Reconciliation, Schedule } from '../types/index.ts';
 import { formatTaka, toBengaliDigits, getTodayDhakaDate, formatBengaliDateTime, formatBengaliDate } from '../utils/formatters.ts';
 import {
+  downloadElementAsPDF,
+  openPrintWindow,
+  combineRouteNames,
+  calculateTimeDifference,
+} from '../utils/pdfGenerator.ts';
+import {
   Scale,
   Calendar,
   CheckCircle,
@@ -19,15 +25,18 @@ import {
   Printer,
   FileText,
   X,
+  Building2,
 } from 'lucide-react';
 
 export const ReconciliationPage: React.FC = () => {
-  const { user, isMasterAdmin, isModerator } = useAuth();
+  const { user, isSuperAdmin, isCompanyAdmin, isMasterAdmin, isModerator } = useAuth();
   const [date, setDate] = useState<string>(getTodayDhakaDate());
   const [loading, setLoading] = useState<boolean>(true);
   const [pairs, setPairs] = useState<any[]>([]);
   const [reconciliations, setReconciliations] = useState<Reconciliation[]>([]);
   const [reconcilingVehicleId, setReconcilingVehicleId] = useState<string | null>(null);
+  const [batchReconciling, setBatchReconciling] = useState<boolean>(false);
+  const [filterTab, setFilterTab] = useState<'ALL' | 'RECONCILED' | 'PENDING'>('ALL');
   const [successMsg, setSuccessMsg] = useState<string>('');
   const [errorMsg, setErrorMsg] = useState<string>('');
   const [showPrintModal, setShowPrintModal] = useState<boolean>(false);
@@ -51,7 +60,7 @@ export const ReconciliationPage: React.FC = () => {
   }, [date]);
 
   const handleReconcile = async (pair: any) => {
-    if (!isMasterAdmin && !isModerator) {
+    if (!isMasterAdmin && !isModerator && !isCompanyAdmin && !isSuperAdmin) {
       alert('আপনার ট্রিপ সমন্বয় করার অনুমতি নেই!');
       return;
     }
@@ -69,12 +78,34 @@ export const ReconciliationPage: React.FC = () => {
         notes: pair.isNightHoldMatch ? 'নাইট-হোল্ড আপ ট্রিপের সাথে ডাউন ট্রিপ সমন্বয়' : '',
       });
 
-      setSuccessMsg(`গাড়ি "${pair.vehicleRegNo}" এর আপ ও ডাউন ট্রিপের আর্থিক সমন্বয় সফল হয়েছে!`);
+      setSuccessMsg(`গাড়ি "${pair.vehicleRegNo}" এর আপ ও ডাউন ট্রিপের আর্থিক সমন্বয় সফল হয়েছে! ট্রিপ পূর্ণাঙ্গ রূপ পেয়েছে।`);
       await fetchReconciliationData();
     } catch (err: any) {
       setErrorMsg(err.message || 'সমন্বয় ব্যর্থ হয়েছে।');
     } finally {
       setReconcilingVehicleId(null);
+    }
+  };
+
+  // Reconcile all ready pairs in one click
+  const handleBatchReconcile = async () => {
+    if (!isMasterAdmin && !isModerator && !isCompanyAdmin && !isSuperAdmin) {
+      alert('আপনার ট্রিপ সমন্বয় করার অনুমতি নেই!');
+      return;
+    }
+
+    setBatchReconciling(true);
+    setErrorMsg('');
+    setSuccessMsg('');
+
+    try {
+      const res = await api.batchReconcile(date);
+      setSuccessMsg(`এক ক্লিকে ${toBengaliDigits(res.count)} টি প্রস্তুত ট্রিপের সমন্বয় সফলভাবে সম্পন্ন হয়েছে! কোনো অপেক্ষমান ট্রিপ নেই।`);
+      await fetchReconciliationData();
+    } catch (err: any) {
+      setErrorMsg(err.message || 'ব্যাচ সমন্বয় ব্যর্থ হয়েছে।');
+    } finally {
+      setBatchReconciling(false);
     }
   };
 
@@ -86,94 +117,64 @@ export const ReconciliationPage: React.FC = () => {
     }
 
     const headers = [
-      'ক্রমিক',
-      'গাড়ির নম্বর',
-      'রুট',
+      'ক্রমিক নং',
+      'তারিখ',
+      'গাড়ি নাম্বার',
+      'নাইট হোল্ড / রেগুলার ট্রিপ',
+      'সময় আপ ও ডাউন',
+      'সময়ের ব্যবধান (আপ সময় - ডাউন সময় = রেজাল্ট)',
+      'রুট (রেজাল্ট)',
+      'মোট কিলোমিটার (আপ কিমি + ডাউন কিমি = রেজাল্ট)',
       'সুপারভাইজার',
-      'আপ ট্রিপ নং',
-      'আপ ছাড়ার সময়',
-      'আপ বুকড সিট',
-      'আপ আদায় (৳)',
-      'ডাউন ট্রিপ নং',
-      'ডাউন ছাড়ার সময়',
-      'ডাউন বুকড সিট',
-      'ডাউন আদায় (৳)',
-      'মোট কম্বাইন্ড কালেকশন (৳)',
-      'সমন্বয় স্ট্যাটাস',
-      'অনুমোদনকারী',
+      'ড্রাইভার',
     ];
 
     const rows = pairs.map((p, idx) => {
-      const isReconciled = p.reconciliationStatus === 'reconciled';
-      const statusText = isReconciled ? 'সমন্বিত (Reconciled)' : p.reconciliationStatus === 'ready' ? 'প্রস্তুত' : 'অপেক্ষমান';
+      const upTime = p.upTrip?.departureTime || '-';
+      const downTime = p.downTrip?.departureTime || '-';
+      const timeDiff = calculateTimeDifference(p.upTrip?.departureTime, p.downTrip?.departureTime, p.isNightHoldMatch);
+      const combinedRoute = combineRouteNames(p.upRouteName, p.downRouteName);
+      const totalKm = (p.upDistanceKm || 75) + (p.downDistanceKm || 75);
+
       return [
         idx + 1,
+        `"${date}"`,
         `"${p.vehicleRegNo || ''}"`,
-        `"${p.routeName || ''}"`,
+        p.isNightHoldMatch ? '"নাইট হোল্ড ট্রিপ"' : '"রেগুলার ট্রিপ"',
+        `"আপ: ${upTime} | ডাউন: ${downTime}"`,
+        `"${timeDiff}"`,
+        `"${combinedRoute}"`,
+        `"${p.upDistanceKm || 75} + ${p.downDistanceKm || 75} = ${totalKm} কিমি"`,
         `"${p.supervisor || ''}"`,
-        `"${p.upTrip?.tripNo || 'নেই'}"`,
-        `"${p.upTrip?.departureTime || '-'}"`,
-        p.upTrip?.totalBookedSeats || 0,
-        p.upCollection || 0,
-        `"${p.downTrip?.tripNo || 'নেই'}"`,
-        `"${p.downTrip?.departureTime || '-'}"`,
-        p.downTrip?.totalBookedSeats || 0,
-        p.downCollection || 0,
-        p.combinedCollection || 0,
-        `"${statusText}"`,
-        `"${p.existingReconciliation?.reconciledBy || '-'}"`,
+        `"${p.driver || p.upTrip?.driver || p.downTrip?.driver || '-'}"`,
       ].join(',');
     });
 
-    // Summary row
-    const totalUp = pairs.reduce((sum, p) => sum + (p.upCollection || 0), 0);
-    const totalDown = pairs.reduce((sum, p) => sum + (p.downCollection || 0), 0);
-    const totalAll = pairs.reduce((sum, p) => sum + (p.combinedCollection || 0), 0);
-
-    const summaryRow = [
-      'সর্বমোট',
-      `"${pairs.length} টি গাড়ি"`,
-      '""',
-      '""',
-      '""',
-      '""',
-      '""',
-      totalUp,
-      '""',
-      '""',
-      '""',
-      totalDown,
-      totalAll,
-      '""',
-      '""',
-    ].join(',');
-
-    const csvContent =
-      '\uFEFF' +
-      [
-        `"Counter Management System — দৈনিক ট্রিপ হিসাব সমন্বয় ও আর্থিক অডিট রিপোর্ট"`,
-        `"অপারেশনাল তারিখ: ${date} | এক্সপোর্ট সময়: ${new Date().toLocaleString()}"`,
-        headers.join(','),
-        ...rows,
-        summaryRow,
-      ].join('\r\n');
-
+    const csvContent = '\uFEFF' + [headers.join(','), ...rows].join('\r\n');
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.setAttribute('download', `Trip-Reconciliation-Financial-Report-${date}.csv`);
+    link.setAttribute('download', `DailyReconciliation-${date}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
   };
 
-  // Grand totals
+  // Grand totals & status counts
   const totalCombinedCollection = pairs.reduce((sum, p) => sum + p.combinedCollection, 0);
   const totalUpCollection = pairs.reduce((sum, p) => sum + (p.upCollection || 0), 0);
   const totalDownCollection = pairs.reduce((sum, p) => sum + (p.downCollection || 0), 0);
   const reconciledCount = pairs.filter((p) => p.reconciliationStatus === 'reconciled').length;
+  const readyCount = pairs.filter((p) => p.reconciliationStatus === 'ready').length;
+  const pendingCount = pairs.filter((p) => p.reconciliationStatus === 'incomplete').length;
+
+  const filteredPairs = pairs.filter((p) => {
+    if (filterTab === 'RECONCILED') return p.reconciliationStatus === 'reconciled';
+    if (filterTab === 'PENDING') return p.reconciliationStatus === 'incomplete';
+    return true;
+  });
 
   return (
     <div className="space-y-6">
@@ -264,13 +265,81 @@ export const ReconciliationPage: React.FC = () => {
           <span className="text-[11px] text-slate-400">অনুমোদিত সমন্বয় সম্পন্ন হয়েছে</span>
         </div>
 
-        <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs">
-          <span className="text-xs font-semibold text-slate-500">অসমন্বিত বা অপেক্ষমান ট্রিপ</span>
-          <div className="text-2xl font-black text-amber-600 mt-1">
-            {toBengaliDigits(pairs.length - reconciledCount)}
+        <div className={`p-4 rounded-2xl border shadow-xs transition-colors ${
+          pendingCount === 0 ? 'bg-emerald-50/70 border-emerald-200' : 'bg-white border-slate-200'
+        }`}>
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold text-slate-500">অসমন্বিত বা অপেক্ষমান ট্রিপ</span>
+            {pendingCount === 0 && (
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">
+                সব সমন্বিত
+              </span>
+            )}
           </div>
-          <span className="text-[11px] text-slate-400">ডাউন বা আপ ট্রিপ অপেক্ষমান</span>
+          <div className={`text-2xl font-black mt-1 ${pendingCount === 0 ? 'text-emerald-700' : 'text-amber-600'}`}>
+            {toBengaliDigits(pendingCount)} {pendingCount === 0 && <span className="text-xs font-bold text-emerald-600">টি (কোনো অপেক্ষমান নেই)</span>}
+          </div>
+          <span className="text-[11px] text-slate-400">
+            {pendingCount === 0 ? 'আজকের সকল ট্রিপের সমন্বয় সম্পন্ন হয়েছে' : 'ডাউন বা আপ ট্রিপ অপেক্ষমান'}
+          </span>
         </div>
+      </div>
+
+      {/* Filter Tabs and Quick Batch Action Bar */}
+      <div className="flex flex-wrap items-center justify-between gap-3 bg-white p-3 rounded-2xl border border-slate-200 shadow-xs">
+        <div className="flex items-center gap-1.5 bg-slate-100 p-1 rounded-xl text-xs font-bold border border-slate-200">
+          <button
+            type="button"
+            onClick={() => setFilterTab('ALL')}
+            className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
+              filterTab === 'ALL'
+                ? 'bg-slate-900 text-white shadow-xs'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            সকল ট্রিপ ({toBengaliDigits(pairs.length)})
+          </button>
+          <button
+            type="button"
+            onClick={() => setFilterTab('RECONCILED')}
+            className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer flex items-center gap-1 ${
+              filterTab === 'RECONCILED'
+                ? 'bg-emerald-600 text-white shadow-xs'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <CheckCircle className="w-3.5 h-3.5" />
+            <span>সমন্বিত ({toBengaliDigits(reconciledCount)})</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setFilterTab('PENDING')}
+            className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer flex items-center gap-1 ${
+              filterTab === 'PENDING'
+                ? 'bg-amber-600 text-white shadow-xs'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <Clock className="w-3.5 h-3.5" />
+            <span>অপেক্ষমান ({toBengaliDigits(pendingCount)})</span>
+          </button>
+        </div>
+
+        {readyCount > 0 && (
+          <button
+            type="button"
+            disabled={batchReconciling}
+            onClick={handleBatchReconcile}
+            className="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white rounded-xl text-xs font-bold shadow-xs hover:shadow-md transition-all cursor-pointer disabled:opacity-50"
+          >
+            <ShieldCheck className="w-4 h-4 text-emerald-200" />
+            <span>
+              {batchReconciling
+                ? 'সমন্বয় হচ্ছে...'
+                : `এক ক্লিকে সকল প্রস্তুত ট্রিপ সমন্বয় অনুমোদন (${toBengaliDigits(readyCount)}টি)`}
+            </span>
+          </button>
+        )}
       </div>
 
       {/* Pairs Reconciliation Table */}
@@ -284,9 +353,21 @@ export const ReconciliationPage: React.FC = () => {
           </span>
         </div>
 
-        {pairs.length === 0 ? (
-          <div className="text-center py-12 text-xs text-slate-400">
-            এই তারিখে কোনো গাড়ির ট্রিপ রেকর্ড নেই।
+        {filteredPairs.length === 0 ? (
+          <div className="text-center py-12 px-4">
+            {filterTab === 'PENDING' ? (
+              <div className="max-w-md mx-auto p-6 bg-emerald-50 rounded-2xl border border-emerald-200">
+                <CheckCircle className="w-10 h-10 text-emerald-600 mx-auto mb-2" />
+                <h4 className="font-bold text-sm text-emerald-950">কোনো ট্রিপ অপেক্ষমান নেই!</h4>
+                <p className="text-xs text-emerald-700 mt-1">
+                  আজকের সকল গাড়ির আপ ও ডাউন ট্রিপ সফলভাবে সমন্বয় করা হয়েছে।
+                </p>
+              </div>
+            ) : filterTab === 'RECONCILED' ? (
+              <div className="text-xs text-slate-400">এখনো কোনো ট্রিপ সমন্বয় করা হয়নি।</div>
+            ) : (
+              <div className="text-xs text-slate-400">এই তারিখে কোনো গাড়ির ট্রিপ রেকর্ড নেই।</div>
+            )}
           </div>
         ) : (
           <div className="overflow-x-auto">
@@ -302,7 +383,7 @@ export const ReconciliationPage: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {pairs.map((p) => {
+                {filteredPairs.map((p) => {
                   const isReconciled = p.reconciliationStatus === 'reconciled';
                   const isReady = p.reconciliationStatus === 'ready';
 
@@ -313,8 +394,12 @@ export const ReconciliationPage: React.FC = () => {
                           <Bus className="w-4 h-4 text-slate-500" />
                           <span>{p.vehicleRegNo}</span>
                         </div>
-                        <div className="text-[11px] text-slate-500 mt-0.5">{p.routeName}</div>
-                        <div className="text-[10px] text-slate-400">সুপারভাইজার: {p.supervisor}</div>
+                        <div className="text-[10px] text-slate-500 flex flex-wrap gap-2 mt-0.5">
+                          <span>সুপারভাইজার: <strong className="text-slate-700">{p.supervisor}</strong></span>
+                          {(p.driver || p.upTrip?.driver || p.downTrip?.driver) && (
+                            <span>| ড্রাইভার: <strong className="text-slate-700">{p.driver || p.upTrip?.driver || p.downTrip?.driver}</strong></span>
+                          )}
+                        </div>
                       </td>
 
                       {/* Up Trip */}
@@ -374,18 +459,18 @@ export const ReconciliationPage: React.FC = () => {
                       <td className="py-3 px-4 text-center">
                         {isReconciled ? (
                           <span className="inline-flex items-center gap-1 px-2.5 py-1 bg-emerald-100 text-emerald-800 text-[11px] font-bold rounded-full">
-                            <CheckCircle className="w-3 h-3" />
-                            <span>সমন্বিত (Reconciled)</span>
+                            <CheckCircle className="w-3.5 h-3.5 text-emerald-600" />
+                            <span>সমন্বিত (১টি পূর্ণাঙ্গ ট্রিপ)</span>
                           </span>
                         ) : isReady ? (
                           <span className="inline-flex items-center gap-1 px-2.5 py-1 bg-blue-100 text-blue-800 text-[11px] font-bold rounded-full">
-                            <Clock className="w-3 h-3" />
+                            <Clock className="w-3 h-3 text-blue-600" />
                             <span>সমন্বয়ের জন্য প্রস্তুত</span>
                           </span>
                         ) : (
                           <span className="inline-flex items-center gap-1 px-2.5 py-1 bg-amber-100 text-amber-800 text-[11px] font-bold rounded-full">
-                            <AlertCircle className="w-3 h-3" />
-                            <span>অসম্পূর্ণ ট্রিপ</span>
+                            <AlertCircle className="w-3 h-3 text-amber-600" />
+                            <span>অসম্পূর্ণ ট্রিপ (অপেক্ষমান)</span>
                           </span>
                         )}
                       </td>
@@ -393,9 +478,10 @@ export const ReconciliationPage: React.FC = () => {
                       {/* Action */}
                       <td className="py-3 px-4 text-right">
                         {isReconciled ? (
-                          <div className="text-[10px] text-slate-400">
-                            অনুমোদন করেছেন: {p.existingReconciliation?.reconciledBy}
-                          </div>
+                          <span className="inline-flex items-center gap-1 px-2.5 py-1 bg-slate-100 text-slate-700 text-[10px] font-bold rounded-lg border border-slate-200">
+                            <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+                            <span>অনুমোদিত: {p.existingReconciliation?.reconciledBy || 'এডমিন'}</span>
+                          </span>
                         ) : (
                           <button
                             type="button"
@@ -421,13 +507,18 @@ export const ReconciliationPage: React.FC = () => {
 
       {/* PDF / Printable Daily Financial Reconciliation Report Modal */}
       {showPrintModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-6 overflow-y-auto">
-          <div className="bg-white w-full max-w-4xl rounded-2xl shadow-2xl border border-slate-200 overflow-hidden flex flex-col max-h-[92vh]">
-            {/* Modal Header & Controls (hidden in print) */}
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-2 sm:p-4 overflow-y-auto animate-in fade-in duration-200">
+          <div className="bg-white w-full max-w-6xl rounded-3xl shadow-2xl border border-slate-200 overflow-hidden flex flex-col max-h-[94vh]">
+            {/* Modal Header & Action Controls (hidden in print) */}
             <div className="p-4 bg-slate-900 text-white flex items-center justify-between print:hidden">
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2.5">
                 <FileText className="w-5 h-5 text-emerald-400" />
-                <h3 className="font-bold text-sm">দৈনিক ট্রিপ আর্থিক রিপোর্ট — প্রিন্ট ও PDF প্রিভিউ</h3>
+                <div>
+                  <h3 className="font-bold text-sm sm:text-base">দৈনিক ট্রিপ সমন্বয় ও পূর্ণাঙ্গ অডিট রিপোর্ট — ল্যান্ডস্কেপ প্রিভিউ</h3>
+                  <div className="text-[11px] text-slate-300">
+                    {user?.company?.name || 'কাউন্টার টিকেটিং'} • অপারেশনাল তারিখ: {date}
+                  </div>
+                </div>
               </div>
 
               <div className="flex items-center gap-2">
@@ -442,11 +533,39 @@ export const ReconciliationPage: React.FC = () => {
 
                 <button
                   type="button"
-                  onClick={() => window.print()}
-                  className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
+                  onClick={async () => {
+                    try {
+                      await downloadElementAsPDF(
+                        'printable-reconciliation-report',
+                        `Trip-Reconciliation-${date}.pdf`,
+                        'landscape',
+                        'a4'
+                      );
+                    } catch (err) {
+                      console.error('PDF generation error:', err);
+                      window.print();
+                    }
+                  }}
+                  className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 transition-colors cursor-pointer border border-slate-700 shadow-xs"
+                >
+                  <Download className="w-4 h-4 text-emerald-400" />
+                  <span>বাংলা PDF ডাউনলোড</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    const el = document.getElementById('printable-reconciliation-report');
+                    if (el) {
+                      openPrintWindow(el.innerHTML, `দৈনিক ট্রিপ রিপোর্ট — ${date}`, 'A4-landscape');
+                    } else {
+                      window.print();
+                    }
+                  }}
+                  className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
                 >
                   <Printer className="w-4 h-4" />
-                  <span>প্রিন্ট / PDF সংরক্ষণ</span>
+                  <span>প্রিন্ট / PDF সংরক্ষণ (Landscape)</span>
                 </button>
 
                 <button
@@ -460,161 +579,172 @@ export const ReconciliationPage: React.FC = () => {
               </div>
             </div>
 
-            {/* Printable Document Body */}
+            {/* Printable Document Body - Official Company Letterhead Layout */}
             <div
               id="printable-reconciliation-report"
               className="p-6 sm:p-8 overflow-y-auto flex-1 bg-white text-slate-900 font-sans"
             >
-              {/* Document Header */}
-              <div className="border-b-2 border-slate-800 pb-4 mb-4 text-center">
-                <h1 className="text-xl font-black text-slate-900 tracking-wide uppercase">
-                  Counter Management System
-                </h1>
-                <p className="text-xs text-slate-600 font-semibold mt-0.5">
-                  কাউন্টার বুকিং ও ট্রিপ ইনফরমেশন সিস্টেম
-                </p>
-                <div className="inline-block mt-2 px-3 py-1 bg-slate-100 border border-slate-300 rounded-lg text-xs font-bold text-slate-800">
-                  দৈনিক ট্রিপ হিসাব সমন্বয় ও আর্থিক অডিট রিপোর্ট
-                </div>
-                <div className="flex flex-wrap items-center justify-between text-xs text-slate-500 mt-3 pt-2 border-t border-slate-200">
-                  <span>
-                    অপারেশনাল তারিখ: <strong className="text-slate-800">{date}</strong> ({formatBengaliDate(date)})
-                  </span>
-                  <span>
-                    রিপোর্ট তৈরির সময়: <strong className="text-slate-800">{formatBengaliDateTime(new Date().toISOString())}</strong>
-                  </span>
-                  <span>
-                    প্রস্তুতকারক: <strong className="text-slate-800">{user?.name} ({user?.role})</strong>
-                  </span>
+              {/* Official Company Letterhead Header */}
+              <div className="border-b-2 border-slate-800 pb-4 mb-4">
+                <div className="flex items-center justify-between gap-4">
+                  <div className="flex items-center gap-3">
+                    {user?.company?.logoUrl ? (
+                      <img
+                        src={user.company.logoUrl}
+                        alt={user.company.name}
+                        className="w-14 h-14 rounded-2xl object-contain border border-slate-200 shadow-xs p-0.5 bg-white shrink-0"
+                      />
+                    ) : (
+                      <div className="w-14 h-14 rounded-2xl bg-slate-900 text-white font-black text-xl flex items-center justify-center shrink-0">
+                        <Building2 className="w-7 h-7" />
+                      </div>
+                    )}
+                    <div>
+                      <h1 className="text-xl font-black text-slate-950 tracking-wide uppercase">
+                        {user?.company?.name || 'কাউন্টার টিকেটিং ও ট্রিপ রিপোর্ট'}
+                      </h1>
+                      {user?.company?.address && (
+                        <div className="text-xs text-slate-600 font-medium">
+                          {user.company.address}
+                        </div>
+                      )}
+                      {user?.company?.phone && (
+                        <div className="text-xs text-slate-800 font-bold">
+                          হটলাইন / যোগাযোগ: {user.company.phone}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="text-right">
+                    <div className="inline-block px-3 py-1 bg-slate-100 border border-slate-400 rounded-lg text-xs font-black text-slate-900 uppercase">
+                      দৈনিক ট্রিপ সমন্বয় ও পূর্ণাঙ্গ অডিট রিপোর্ট
+                    </div>
+                    <div className="text-xs text-slate-600 mt-1">
+                      অপারেশনাল তারিখ: <strong className="text-slate-950 font-bold">{date}</strong> ({formatBengaliDate(date)})
+                    </div>
+                    <div className="text-[11px] text-slate-500">
+                      রিপোর্ট প্রিন্ট সময়: {formatBengaliDateTime(new Date().toISOString())}
+                    </div>
+                  </div>
                 </div>
               </div>
 
-              {/* Financial KPI Summary Cards */}
-              <div className="grid grid-cols-3 gap-3 mb-5">
-                <div className="p-3 bg-slate-50 border border-slate-300 rounded-xl text-center">
-                  <div className="text-[11px] text-slate-500 font-semibold">আপ ট্রিপ মোট কালেকশন</div>
-                  <div className="text-lg font-black text-blue-700 mt-0.5">
-                    {formatTaka(totalUpCollection)}
-                  </div>
-                </div>
-
-                <div className="p-3 bg-slate-50 border border-slate-300 rounded-xl text-center">
-                  <div className="text-[11px] text-slate-500 font-semibold">ডাউন ট্রিপ মোট কালেকশন</div>
-                  <div className="text-lg font-black text-emerald-700 mt-0.5">
-                    {formatTaka(totalDownCollection)}
-                  </div>
-                </div>
-
-                <div className="p-3 bg-emerald-50 border border-emerald-300 rounded-xl text-center">
-                  <div className="text-[11px] text-emerald-800 font-semibold">সর্বমোট কম্বাইন্ড আদায়</div>
-                  <div className="text-lg font-black text-emerald-900 mt-0.5">
-                    {formatTaka(totalCombinedCollection)}
-                  </div>
-                </div>
-              </div>
-
-              {/* Table Breakdown */}
-              <table className="w-full text-left text-[11px] border-collapse border border-slate-300 mb-6">
-                <thead>
-                  <tr className="bg-slate-100 text-slate-800">
-                    <th className="border border-slate-300 p-2 font-bold text-center w-8">ক্র.</th>
-                    <th className="border border-slate-300 p-2 font-bold">গাড়ির নম্বর ও রুট</th>
-                    <th className="border border-slate-300 p-2 font-bold">সুপারভাইজার</th>
-                    <th className="border border-slate-300 p-2 font-bold">আপ ট্রিপ (সময়)</th>
-                    <th className="border border-slate-300 p-2 font-bold text-right">আপ আদায় (৳)</th>
-                    <th className="border border-slate-300 p-2 font-bold">ডাউন ট্রিপ (সময়)</th>
-                    <th className="border border-slate-300 p-2 font-bold text-right">ডাউন আদায় (৳)</th>
-                    <th className="border border-slate-300 p-2 font-bold text-right">মোট আদায় (৳)</th>
-                    <th className="border border-slate-300 p-2 font-bold text-center">স্ট্যাটাস</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {pairs.map((p, idx) => (
-                    <tr key={p.vehicleId} className="even:bg-slate-50/50">
-                      <td className="border border-slate-300 p-2 text-center font-mono">{idx + 1}</td>
-                      <td className="border border-slate-300 p-2 font-semibold">
-                        {p.vehicleRegNo}
-                        <div className="text-[9.5px] text-slate-500 font-normal">{p.routeName}</div>
-                      </td>
-                      <td className="border border-slate-300 p-2">{p.supervisor}</td>
-                      <td className="border border-slate-300 p-2">
-                        {p.upTrip ? `${p.upTrip.tripNo} (${p.upTrip.departureTime})` : '-'}
-                        {p.isNightHoldMatch && <span className="block text-[9px] text-purple-700 font-bold">(নাইট হোল্ড)</span>}
-                      </td>
-                      <td className="border border-slate-300 p-2 text-right font-mono font-bold text-blue-800">
-                        {formatTaka(p.upCollection)}
-                      </td>
-                      <td className="border border-slate-300 p-2">
-                        {p.downTrip ? `${p.downTrip.tripNo} (${p.downTrip.departureTime})` : '-'}
-                      </td>
-                      <td className="border border-slate-300 p-2 text-right font-mono font-bold text-emerald-800">
-                        {formatTaka(p.downCollection)}
-                      </td>
-                      <td className="border border-slate-300 p-2 text-right font-mono font-black text-slate-900 bg-slate-50">
-                        {formatTaka(p.combinedCollection)}
-                      </td>
-                      <td className="border border-slate-300 p-2 text-center">
-                        <span
-                          className={`inline-block px-1.5 py-0.5 rounded text-[9px] font-bold ${
-                            p.reconciliationStatus === 'reconciled'
-                              ? 'bg-emerald-100 text-emerald-800'
-                              : p.reconciliationStatus === 'ready'
-                              ? 'bg-blue-100 text-blue-800'
-                              : 'bg-amber-100 text-amber-800'
-                          }`}
-                        >
-                          {p.reconciliationStatus === 'reconciled'
-                            ? 'সমন্বিত'
-                            : p.reconciliationStatus === 'ready'
-                            ? 'প্রস্তুত'
-                            : 'অপেক্ষমান'}
-                        </span>
-                      </td>
+              {/* Exact 10 Columns Table */}
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-[11px] border-collapse border border-slate-400 mb-6">
+                  <thead>
+                    <tr className="bg-slate-100 text-slate-900 text-center font-bold">
+                      <th className="border border-slate-400 p-2 w-10">ক্রমিক নং</th>
+                      <th className="border border-slate-400 p-2 w-24">তারিখ</th>
+                      <th className="border border-slate-400 p-2 w-36">গাড়ি নাম্বার</th>
+                      <th className="border border-slate-400 p-2 w-32">নাইট হোল্ড / রেগুলার ট্রিপ</th>
+                      <th className="border border-slate-400 p-2 w-44">সময় আপ ও ডাউন</th>
+                      <th className="border border-slate-400 p-2 w-36">সময়ের ব্যবধান (আপ সময় - ডাউন সময়)</th>
+                      <th className="border border-slate-400 p-2">রুট (রেজাল্ট)</th>
+                      <th className="border border-slate-400 p-2 w-36 text-center">মোট কিলোমিটার</th>
+                      <th className="border border-slate-400 p-2 w-32">সুপারভাইজার</th>
+                      <th className="border border-slate-400 p-2 w-32">ড্রাইভার</th>
                     </tr>
-                  ))}
-                  {/* Grand Total Row */}
-                  <tr className="bg-slate-200 font-black text-slate-900">
-                    <td colSpan={4} className="border border-slate-300 p-2 text-right">
-                      সর্বমোট ({toBengaliDigits(pairs.length)} টি গাড়ি):
-                    </td>
-                    <td className="border border-slate-300 p-2 text-right font-mono">
-                      {formatTaka(totalUpCollection)}
-                    </td>
-                    <td className="border border-slate-300 p-2 text-right">
-                      -
-                    </td>
-                    <td className="border border-slate-300 p-2 text-right font-mono">
-                      {formatTaka(totalDownCollection)}
-                    </td>
-                    <td className="border border-slate-300 p-2 text-right font-mono text-emerald-900">
-                      {formatTaka(totalCombinedCollection)}
-                    </td>
-                    <td className="border border-slate-300 p-2 text-center text-[10px]">
-                      {toBengaliDigits(reconciledCount)}টি সমন্বিত
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {pairs.map((p, idx) => {
+                      const upTime = p.upTrip?.departureTime || '-';
+                      const downTime = p.downTrip?.departureTime || '-';
+                      const timeDiff = calculateTimeDifference(p.upTrip?.departureTime, p.downTrip?.departureTime, p.isNightHoldMatch);
+                      const combinedRoute = combineRouteNames(p.upRouteName, p.downRouteName);
+                      const upDist = p.upDistanceKm || 75;
+                      const downDist = p.downDistanceKm || 75;
+                      const totalKm = upDist + downDist;
 
-              {/* Sign-off Section */}
-              <div className="grid grid-cols-3 gap-6 pt-12 mt-6 border-t border-slate-300 text-center text-xs">
-                <div>
-                  <div className="border-t border-dotted border-slate-600 pt-1.5 font-bold text-slate-800">
-                    কাউন্টার সুপারভাইজার / ইনচার্জ
-                  </div>
-                  <span className="text-[10px] text-slate-500">স্বাক্ষর ও সিল</span>
+                      return (
+                        <tr key={p.vehicleId} className="even:bg-slate-50/70 hover:bg-slate-100/50">
+                          {/* 1. ক্রমিক নং */}
+                          <td className="border border-slate-400 p-2 text-center font-bold font-mono">
+                            {idx + 1}
+                          </td>
+
+                          {/* 2. তারিখ */}
+                          <td className="border border-slate-400 p-2 text-center font-semibold whitespace-nowrap">
+                            {date}
+                          </td>
+
+                          {/* 3. গাড়ি নাম্বার */}
+                          <td className="border border-slate-400 p-2 font-black text-slate-900 whitespace-nowrap">
+                            {p.vehicleRegNo}
+                          </td>
+
+                          {/* 4. নাইট হোল্ড / রেগুলার ট্রিপ */}
+                          <td className="border border-slate-400 p-2 text-center">
+                            {p.isNightHoldMatch ? (
+                              <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold bg-purple-100 text-purple-900 border border-purple-300">
+                                নাইট হোল্ড ট্রিপ
+                              </span>
+                            ) : (
+                              <span className="inline-block px-2 py-0.5 rounded text-[10px] font-semibold bg-slate-100 text-slate-700 border border-slate-300">
+                                রেগুলার ট্রিপ
+                              </span>
+                            )}
+                          </td>
+
+                          {/* 5. সময় আপ ও ডাউন */}
+                          <td className="border border-slate-400 p-2 font-mono text-[10.5px]">
+                            <div className="text-blue-900 font-bold">আপ: {upTime}</div>
+                            <div className="text-emerald-900 font-bold">ডাউন: {downTime}</div>
+                          </td>
+
+                          {/* 6. সময়ের ব্যবধান (আপ সময় - ডাউন সময় = রেজাল্ট) */}
+                          <td className="border border-slate-400 p-2 text-center font-bold text-slate-800">
+                            {timeDiff}
+                          </td>
+
+                          {/* 7. রুট (রেজাল্ট) */}
+                          <td className="border border-slate-400 p-2 font-bold text-slate-900">
+                            {combinedRoute}
+                          </td>
+
+                          {/* 8. মোট কিলোমিটার (আপ রুট দূরত্ব + ডাউন রুট দূরত্ব = রেজাল্ট) */}
+                          <td className="border border-slate-400 p-2 text-center font-bold text-slate-900">
+                            {toBengaliDigits(upDist)} + {toBengaliDigits(downDist)} = {toBengaliDigits(totalKm)} কিমি
+                          </td>
+
+                          {/* 9. সুপারভাইজার */}
+                          <td className="border border-slate-400 p-2 font-medium text-slate-800">
+                            {p.supervisor || 'কুদ্দুস'}
+                          </td>
+
+                          {/* 10. ড্রাইভার */}
+                          <td className="border border-slate-400 p-2 font-medium text-slate-800">
+                            {p.driver || p.upTrip?.driver || p.downTrip?.driver || 'আল আমিন'}
+                          </td>
+                        </tr>
+                      );
+                    })}
+
+                    {pairs.length === 0 && (
+                      <tr>
+                        <td colSpan={10} className="border border-slate-400 p-6 text-center text-slate-500 font-semibold">
+                          এই তারিখে প্রদর্শনের জন্য কোনো ট্রিপ সমন্বয় ডাটা পাওয়া যায়নি।
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Single Certification Line on Right */}
+              <div className="flex justify-between items-end pt-12 mt-6 border-t border-slate-300">
+                <div className="text-[11px] text-slate-500">
+                  * এটি একটি কম্পিউটার জেনারেটেড ট্রিপ অডিট বিবরণী। কোনো মোবাইল নম্বর বা মালিকের ব্যক্তিগত তথ্য অন্তর্ভুক্ত নয়।
                 </div>
-                <div>
-                  <div className="border-t border-dotted border-slate-600 pt-1.5 font-bold text-slate-800">
-                    হিসাবরক্ষণ কর্মকর্তা
+
+                <div className="text-right pr-6">
+                  <div className="text-sm font-black text-slate-900 border-t-2 border-slate-900 pt-1.5 inline-block min-w-[240px] text-center">
+                    প্রত্যায়নকারী : ____________________
                   </div>
-                  <span className="text-[10px] text-slate-500">স্বাক্ষর ও তারিখ</span>
-                </div>
-                <div>
-                  <div className="border-t border-dotted border-slate-600 pt-1.5 font-bold text-slate-800">
-                    অডিট ও প্রশাসন অনুমোদন
+                  <div className="text-[10px] text-slate-500 text-center mt-0.5">
+                    কর্তৃপক্ষের স্বাক্ষর ও সিল
                   </div>
-                  <span className="text-[10px] text-slate-500">অনুমোদিত স্বাক্ষর</span>
                 </div>
               </div>
             </div>

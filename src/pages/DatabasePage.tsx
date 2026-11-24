@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useAuth } from '../context/AuthContext.tsx';
 import { api } from '../services/api.ts';
-import type { Schedule, Reconciliation, Vehicle } from '../types/index.ts';
+import type { Schedule, Vehicle, RouteItem } from '../types/index.ts';
 import {
   formatTaka,
   toBengaliDigits,
@@ -20,28 +20,44 @@ import {
   RefreshCw,
   Sparkles,
   MapPin,
-  ArrowRight,
-  Filter,
   CheckCircle2,
   Moon,
   Info,
+  Route as RouteIcon,
+  ShieldCheck,
+  TrendingUp,
+  Award,
 } from 'lucide-react';
 
-interface DatabaseRow {
+export interface DatabaseRow {
   id: string;
   autoSerial: number;
   dateDisplay: string;
+  operationalDate: string; // The date when the trip is counted
   isNightHold: boolean;
   vehicleRegNo: string;
   vehicleOwnerName?: string;
   upTime: string;
+  upTripNo?: string;
   downTime: string;
+  downTripNo?: string;
   timeDiffDisplay: string;
   timeDiffMinutes: number;
   routeMerged: string;
+  distanceKmDisplay: string;
+  totalDistanceKm: number;
+  upSeatsAndFare: string;
+  upBookedSeats: number;
+  upFare: number;
+  downSeatsAndFare: string;
+  downBookedSeats: number;
+  downFare: number;
+  totalSeatsAndFare: string;
+  combinedSeats: number;
+  combinedFare: number;
   supervisorDisplay: string;
-  upTripNo?: string;
-  downTripNo?: string;
+  driverDisplay: string;
+  isFullTrip: boolean; // True when UP + DOWN paired and completed
   status: string;
 }
 
@@ -62,7 +78,7 @@ function timeToMinutes(timeStr: string): number {
 
 // Calculate time difference between UP time and DOWN time
 function calculateTimeDifference(upTime: string, downTime: string, isNightHold: boolean): { display: string; minutes: number } {
-  if (!upTime || !downTime) {
+  if (!upTime || !downTime || downTime.includes('অপেক্ষমাণ') || downTime.includes('আগামীকাল')) {
     return { display: 'নির্ধারিত হয়নি', minutes: 0 };
   }
 
@@ -92,22 +108,23 @@ function calculateTimeDifference(upTime: string, downTime: string, isNightHold: 
   return { display, minutes: diffMinutes };
 }
 
+// Clean up parenthesis details like (ভায়া পদ্মা সেতু)
+function cleanRouteName(str: string): string {
+  if (!str) return '';
+  return str.replace(/\([^)]*\)/g, '').trim();
+}
+
 // Intelligent Route Merging according to user instructions:
-// (মাদারীপুর - গুলিস্থান + গুলিস্থান - মাদারীপুর = মাদারীপুর - গুলিস্থান - মাদারীপুর)
-// (কালকিনি - সায়দাবাদ + গুলিস্থান - মাদারীপুর = কালকিনি - সায়দাবাদ - গুলিস্থান - মাদারীপুর)
+// (মাদারীপুর - গুলিস্থান + গুলিস্থান - মাদারীপুর = মাদারীপুর - গুলিস্থান - মাদারীপুর ১টি পুর্নাঙ্গ ট্রিপ)
+// (কালকিনি - কদমতলী + গুলিস্থান - মাদারীপুর = কালকিনি - কদমতলী - গুলিস্থান - মাদারীপুর ১টি পুর্নাঙ্গ ট্রিপ)
 function mergeRoutes(upRouteName: string, downRouteName: string): string {
-  if (!upRouteName && !downRouteName) return 'রুট সমন্বয় অপেক্ষমাণ';
-  if (!upRouteName) return downRouteName;
-  if (!downRouteName) return upRouteName;
+  if (!upRouteName && !downRouteName) return 'রুট সমন্বয় অপেক্ষমাণ';
+  if (!upRouteName) return `${downRouteName} (ডাউন ট্রিপ)`;
+  if (!downRouteName) return `${upRouteName} (আপ ট্রিপ - ফিরতি অপেক্ষমাণ)`;
 
-  // Clean parenthesis details like (ভায়া পদ্মা সেতু)
-  const clean = (str: string) =>
-    str.replace(/\([^)]*\)/g, '').trim();
+  const upClean = cleanRouteName(upRouteName);
+  const downClean = cleanRouteName(downRouteName);
 
-  const upClean = clean(upRouteName);
-  const downClean = clean(downRouteName);
-
-  // Split by ' - ' or ' ➜ ' or '->'
   const splitStops = (str: string) => {
     return str
       .split(/[-➜→]/)
@@ -118,22 +135,25 @@ function mergeRoutes(upRouteName: string, downRouteName: string): string {
   const upStops = splitStops(upClean);
   const downStops = splitStops(downClean);
 
-  if (upStops.length === 0 && downStops.length === 0) return 'মাদারীপুর - ঢাকা - মাদারীপুর';
+  if (upStops.length === 0 && downStops.length === 0) return 'মাদারীপুর - ঢাকা - মাদারীপুর (১টি পূর্ণাঙ্গ ট্রিপ)';
   if (upStops.length === 0) return downStops.join(' - ');
   if (downStops.length === 0) return upStops.join(' - ');
 
   const upLast = upStops[upStops.length - 1];
   const downFirst = downStops[0];
 
+  let consolidated = '';
   // If the last stop of UP is the same as first stop of DOWN (e.g. গুলিস্থান == গুলিস্থান)
   if (upLast.toLowerCase() === downFirst.toLowerCase()) {
     const merged = [...upStops, ...downStops.slice(1)];
-    return merged.join(' - ');
+    consolidated = merged.join(' - ');
   } else {
-    // If different (e.g. সায়দাবাদ and গুলিস্থান) -> কালকিনি - সায়দাবাদ - গুলিস্থান - মাদারীপুর
+    // If different (e.g. কদমতলী and গুলিস্থান) -> কালকিনি - কদমতলী - গুলিস্থান - মাদারীপুর
     const merged = [...upStops, ...downStops];
-    return merged.join(' - ');
+    consolidated = merged.join(' - ');
   }
+
+  return `${upClean} + ${downClean} = ${consolidated} (১টি পূর্ণাঙ্গ ট্রিপ)`;
 }
 
 // Calculate yesterday's date
@@ -143,31 +163,58 @@ function getYesterdayDate(dateStr: string): string {
   return d.toISOString().split('T')[0];
 }
 
+// Calculate tomorrow's date
+function getTomorrowDate(dateStr: string): string {
+  const d = new Date(dateStr);
+  d.setDate(d.getDate() + 1);
+  return d.toISOString().split('T')[0];
+}
+
+// Helper to determine route distance in KM
+function getRouteDistance(routes: RouteItem[], routeId?: string, routeName?: string): number {
+  if (routeId) {
+    const found = routes.find((r) => r.id === routeId);
+    if (found?.distanceKm && found.distanceKm > 0) return found.distanceKm;
+  }
+  if (routeName) {
+    const found = routes.find((r) => r.name.toLowerCase() === routeName.toLowerCase());
+    if (found?.distanceKm && found.distanceKm > 0) return found.distanceKm;
+    const name = routeName.toLowerCase();
+    if (name.includes('কালকিনি') || name.includes('সাহেবরামপুর')) return 125;
+    if (name.includes('মাদারীপুর') && (name.includes('ঢাকা') || name.includes('গুলিস্তান') || name.includes('সায়দাবাদ') || name.includes('কদমতলী'))) return 110;
+    if (name.includes('বরিশাল')) return 180;
+  }
+  return 110; // Default realistic distance in KM
+}
+
 export const DatabasePage: React.FC = () => {
   const { isMasterAdmin } = useAuth();
   const [date, setDate] = useState<string>(getTodayDhakaDate());
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
+  const [routes, setRoutes] = useState<RouteItem[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [searchTerm, setSearchTerm] = useState<string>('');
   const [vehicleFilter, setVehicleFilter] = useState<string>('ALL');
-  const [nightHoldFilter, setNightHoldFilter] = useState<'ALL' | 'NIGHT_HOLD' | 'REGULAR'>('ALL');
+  const [tripTypeFilter, setTripTypeFilter] = useState<'ALL' | 'FULL_TRIPS' | 'NIGHT_HOLD' | 'PENDING'>('ALL');
 
-  // AI Insights State (Optional assist)
+  // AI Insights State
   const [aiReport, setAiReport] = useState<string>('');
   const [aiLoading, setAiLoading] = useState<boolean>(false);
   const [showAiModal, setShowAiModal] = useState<boolean>(false);
 
-  // Load schedules and vehicles
+  // Load schedules, vehicles, and routes
   const fetchData = async () => {
     setLoading(true);
     try {
-      const [schRes, vehRes] = await Promise.all([
+      const [schRes, vehRes, routeRes] = await Promise.all([
         api.getSchedules({ date }),
         api.getVehicles(),
+        api.getRoutes(),
       ]);
       setSchedules(schRes.schedules || []);
       setVehicles(vehRes.vehicles || []);
+      setRoutes(routeRes.routes || []);
     } catch (err) {
       console.error('Failed to load database records:', err);
     } finally {
@@ -179,104 +226,332 @@ export const DatabasePage: React.FC = () => {
     fetchData();
   }, [date]);
 
-  // Construct Data Table rows with Auto Serial, Date (yesterday + today for night hold),
-  // Time (Up/Down), Time Difference, Route Consolidation, and Supervisor
+  // Construct Data Table rows implementing the exact Night Hold logic:
+  // - If an UP trip (e.g. 1-11-26) has isNightHold: true, its round trip completes on return day (2-11-26).
+  // - Therefore, on 2-11-26, it is counted as a completed full round trip!
+  // - On 1-11-26, it is marked as awaiting return next day and does NOT count as a completed full trip.
+  // - Exactly 13 specified columns:
+  //   তারিখ - গাড়ি নাম্বার - নাইট হোল্ড - আপ ট্রিপ সময় - ডাউন ট্রিপ সময় - সময় ব্যবধান (আপ সময় - ডাউন সময়) -
+  //   রুট (আপ ট্রিপ রুট + ডাউন ট্রিপ রুট) - মোট দুরত্ব (আপ রুট কিমি + ডাউন ট্রিপ কিমি) -
+  //   আপ ট্রিপ সিট বুকিং সংখ্যা + মোট ভাড়া - ডাউন ট্রিপ সিট বুকিং সংখ্যা + মোট ভাড়া -
+  //   মোট সিট বুকিং ও মোট ভাড়ার টাকা - সুপারভাইজার - ড্রাইভার
   const tableRows: DatabaseRow[] = useMemo(() => {
     const rows: DatabaseRow[] = [];
+    const yesterday = getYesterdayDate(date);
+    const tomorrow = getTomorrowDate(date);
 
     // Group schedules by vehicle
-    const vehicleGroupMap: Record<string, { up: Schedule[]; down: Schedule[] }> = {};
+    const vehicleGroups = new Map<string, {
+      yesterdayNightHoldUp: Schedule[];
+      todayUpRegular: Schedule[];
+      todayUpNightHold: Schedule[];
+      todayDown: Schedule[];
+    }>();
 
     schedules.forEach((sch) => {
-      const key = sch.vehicleRegNo;
-      if (!vehicleGroupMap[key]) {
-        vehicleGroupMap[key] = { up: [], down: [] };
+      const reg = sch.vehicleRegNo;
+      if (!vehicleGroups.has(reg)) {
+        vehicleGroups.set(reg, {
+          yesterdayNightHoldUp: [],
+          todayUpRegular: [],
+          todayUpNightHold: [],
+          todayDown: [],
+        });
       }
+      const group = vehicleGroups.get(reg)!;
+
       if (sch.direction === 'UP') {
-        vehicleGroupMap[key].up.push(sch);
+        if (sch.isNightHold) {
+          if (sch.date === yesterday || sch.date < date) {
+            // Yesterday's night-hold UP trip returning on this operational date
+            group.yesterdayNightHoldUp.push(sch);
+          } else {
+            // Initiated today, returns tomorrow
+            group.todayUpNightHold.push(sch);
+          }
+        } else {
+          group.todayUpRegular.push(sch);
+        }
       } else {
-        vehicleGroupMap[key].down.push(sch);
+        // DOWN trips for this date
+        if (sch.date === date) {
+          group.todayDown.push(sch);
+        }
       }
     });
 
     let autoSl = 1;
 
-    // 1. Process paired vehicle trips
-    Object.keys(vehicleGroupMap).forEach((vehReg) => {
-      const { up, down } = vehicleGroupMap[vehReg];
-      const maxPairs = Math.max(up.length, down.length);
+    vehicleGroups.forEach((group, vehReg) => {
+      // 1. Process yesterday's Night Hold UP trips that return today
+      // Rule: Tripped counted on today (return day)
+      group.yesterdayNightHoldUp.forEach((upTrip) => {
+        const downTrip = group.todayDown.shift();
+        const isNightHold = true;
+        const isFullTrip = Boolean(downTrip);
 
-      for (let i = 0; i < maxPairs; i++) {
-        const upTrip = up[i];
-        const downTrip = down[i];
+        const dateDisplay = downTrip
+          ? `${formatBengaliDate(yesterday)} (আপ) + ${formatBengaliDate(date)} (ডাউন)`
+          : `${formatBengaliDate(yesterday)} (আপ) [আজ ${formatBengaliDate(date)} ডাউন অপেক্ষমাণ]`;
 
-        const isNightHold = Boolean(upTrip?.isNightHold || downTrip?.isNightHold);
+        const upTime = `${upTrip.departureTime} ${upTrip.tripSequenceLabel ? `(${upTrip.tripSequenceLabel})` : ''}`;
+        const downTime = downTrip ? `${downTrip.departureTime}` : 'ডাউন ট্রিপ অপেক্ষমাণ';
 
-        // Date calculation: if Night Hold is checked -> "গতকাল + আজ"
-        let dateDisplay = '';
-        if (isNightHold) {
-          const yesterday = getYesterdayDate(date);
-          dateDisplay = `${formatBengaliDate(yesterday)} + ${formatBengaliDate(date)} (নাইট হোল্ড)`;
+        const { display: timeDiffDisplay, minutes: timeDiffMinutes } =
+          downTrip
+            ? calculateTimeDifference(upTrip.departureTime, downTrip.departureTime, isNightHold)
+            : { display: 'নির্ধারিত হয়নি', minutes: 0 };
+
+        const upRoute = upTrip.routeName || '';
+        const downRoute = downTrip?.routeName || '';
+        const routeMerged = mergeRoutes(upRoute, downRoute);
+
+        // Distance in KM
+        const upKm = getRouteDistance(routes, upTrip.routeId, upTrip.routeName);
+        const downKm = downTrip ? getRouteDistance(routes, downTrip.routeId, downTrip.routeName) : 0;
+        const totalDistanceKm = upKm + downKm;
+        const distanceKmDisplay = downTrip
+          ? `${toBengaliDigits(upKm)} কিমি + ${toBengaliDigits(downKm)} কিমি = ${toBengaliDigits(totalDistanceKm)} কিমি`
+          : `${toBengaliDigits(upKm)} কিমি`;
+
+        // Seats & Fares
+        const upBookedSeats = upTrip.totalBookedSeats || 0;
+        const upFare = upTrip.totalCollection || 0;
+        const downBookedSeats = downTrip?.totalBookedSeats || 0;
+        const downFare = downTrip?.totalCollection || 0;
+        const combinedSeats = upBookedSeats + downBookedSeats;
+        const combinedFare = upFare + downFare;
+
+        const upSeatsAndFare = `${toBengaliDigits(upBookedSeats)} সিট | ${formatTaka(upFare)}`;
+        const downSeatsAndFare = downTrip
+          ? `${toBengaliDigits(downBookedSeats)} সিট | ${formatTaka(downFare)}`
+          : '-';
+        const totalSeatsAndFare = `${toBengaliDigits(combinedSeats)} সিট | ${formatTaka(combinedFare)}`;
+
+        // Supervisor
+        const upSup = upTrip.supervisor || '';
+        const downSup = downTrip?.supervisor || '';
+        let supervisorDisplay = '';
+        if (downTrip && upSup && downSup) {
+          supervisorDisplay = upSup === downSup ? upSup : `আপ: ${upSup} | ডাউন: ${downSup}`;
         } else {
-          dateDisplay = formatBengaliDate(date);
+          supervisorDisplay = upSup || downSup || '-';
         }
 
-        const upTime = upTrip?.departureTime || 'নির্ধারিত হয়নি';
-        const downTime = downTrip?.departureTime || 'নির্ধারিত হয়নি';
+        // Driver
+        const upDrv = upTrip.driver || '';
+        const downDrv = downTrip?.driver || '';
+        let driverDisplay = '';
+        if (downTrip && upDrv && downDrv) {
+          driverDisplay = upDrv === downDrv ? upDrv : `আপ: ${upDrv} | ডাউন: ${downDrv}`;
+        } else {
+          driverDisplay = upDrv || downDrv || '-';
+        }
+
+        const owner = upTrip.vehicleOwnerName || downTrip?.vehicleOwnerName || 'সাধারণ';
+
+        rows.push({
+          id: `row-nh-${autoSl}-${vehReg}`,
+          autoSerial: autoSl++,
+          dateDisplay,
+          operationalDate: date,
+          isNightHold: true,
+          vehicleRegNo: vehReg,
+          vehicleOwnerName: owner,
+          upTime,
+          upTripNo: upTrip.tripNo,
+          downTime,
+          downTripNo: downTrip?.tripNo,
+          timeDiffDisplay,
+          timeDiffMinutes,
+          routeMerged,
+          distanceKmDisplay,
+          totalDistanceKm,
+          upSeatsAndFare,
+          upBookedSeats,
+          upFare,
+          downSeatsAndFare,
+          downBookedSeats,
+          downFare,
+          totalSeatsAndFare,
+          combinedSeats,
+          combinedFare,
+          supervisorDisplay,
+          driverDisplay,
+          isFullTrip,
+          status: isFullTrip ? 'সমন্বিত (নাইট হোল্ড পূর্ণাঙ্গ ট্রিপ)' : 'ডাউন ট্রিপ অপেক্ষমাণ',
+        });
+      });
+
+      // 2. Process Regular same-day UP trips paired with remaining today DOWN trips
+      const regularPairsCount = Math.max(group.todayUpRegular.length, group.todayDown.length);
+      for (let i = 0; i < regularPairsCount; i++) {
+        const upTrip = group.todayUpRegular[i];
+        const downTrip = group.todayDown[i];
+        const isFullTrip = Boolean(upTrip && downTrip);
+        const isNightHold = false;
+
+        const dateDisplay = formatBengaliDate(date);
+        const upTime = upTrip
+          ? `${upTrip.departureTime} ${upTrip.tripSequenceLabel ? `(${upTrip.tripSequenceLabel})` : ''}`
+          : '-';
+        const downTime = downTrip ? `${downTrip.departureTime}` : 'ডাউন ট্রিপ অপেক্ষমাণ';
 
         const { display: timeDiffDisplay, minutes: timeDiffMinutes } =
           upTrip && downTrip
             ? calculateTimeDifference(upTrip.departureTime, downTrip.departureTime, isNightHold)
-            : { display: 'অপেক্ষমাণ', minutes: 0 };
+            : { display: 'নির্ধারিত হয়নি', minutes: 0 };
 
         const upRoute = upTrip?.routeName || '';
         const downRoute = downTrip?.routeName || '';
         const routeMerged = mergeRoutes(upRoute, downRoute);
 
-        // Supervisor display
+        // Distance in KM
+        const upKm = upTrip ? getRouteDistance(routes, upTrip.routeId, upTrip.routeName) : 0;
+        const downKm = downTrip ? getRouteDistance(routes, downTrip.routeId, downTrip.routeName) : 0;
+        const totalDistanceKm = upKm + downKm;
+        const distanceKmDisplay =
+          upTrip && downTrip
+            ? `${toBengaliDigits(upKm)} কিমি + ${toBengaliDigits(downKm)} কিমি = ${toBengaliDigits(totalDistanceKm)} কিমি`
+            : `${toBengaliDigits(upKm || downKm)} কিমি`;
+
+        // Seats & Fares
+        const upBookedSeats = upTrip?.totalBookedSeats || 0;
+        const upFare = upTrip?.totalCollection || 0;
+        const downBookedSeats = downTrip?.totalBookedSeats || 0;
+        const downFare = downTrip?.totalCollection || 0;
+        const combinedSeats = upBookedSeats + downBookedSeats;
+        const combinedFare = upFare + downFare;
+
+        const upSeatsAndFare = upTrip ? `${toBengaliDigits(upBookedSeats)} সিট | ${formatTaka(upFare)}` : '-';
+        const downSeatsAndFare = downTrip ? `${toBengaliDigits(downBookedSeats)} সিট | ${formatTaka(downFare)}` : '-';
+        const totalSeatsAndFare = `${toBengaliDigits(combinedSeats)} সিট | ${formatTaka(combinedFare)}`;
+
+        // Supervisor
+        const upSup = upTrip?.supervisor || '';
+        const downSup = downTrip?.supervisor || '';
         let supervisorDisplay = '';
-        if (upTrip && downTrip) {
-          if (upTrip.supervisor === downTrip.supervisor) {
-            supervisorDisplay = `${upTrip.supervisor} (${upTrip.supervisorPhone || 'ফোন নেই'})`;
-          } else {
-            supervisorDisplay = `আপ: ${upTrip.supervisor} | ডাউন: ${downTrip.supervisor}`;
-          }
-        } else if (upTrip) {
-          supervisorDisplay = `${upTrip.supervisor} (${upTrip.supervisorPhone || 'ফোন নেই'})`;
-        } else if (downTrip) {
-          supervisorDisplay = `${downTrip.supervisor} (${downTrip.supervisorPhone || 'ফোন নেই'})`;
+        if (upTrip && downTrip && upSup && downSup) {
+          supervisorDisplay = upSup === downSup ? upSup : `আপ: ${upSup} | ডাউন: ${downSup}`;
+        } else {
+          supervisorDisplay = upSup || downSup || '-';
+        }
+
+        // Driver
+        const upDrv = upTrip?.driver || '';
+        const downDrv = downTrip?.driver || '';
+        let driverDisplay = '';
+        if (upTrip && downTrip && upDrv && downDrv) {
+          driverDisplay = upDrv === downDrv ? upDrv : `আপ: ${upDrv} | ডাউন: ${downDrv}`;
+        } else {
+          driverDisplay = upDrv || downDrv || '-';
         }
 
         const owner = upTrip?.vehicleOwnerName || downTrip?.vehicleOwnerName || 'সাধারণ';
 
         rows.push({
-          id: `row-${autoSl}-${vehReg}`,
+          id: `row-reg-${autoSl}-${vehReg}-${i}`,
           autoSerial: autoSl++,
           dateDisplay,
-          isNightHold,
+          operationalDate: date,
+          isNightHold: false,
           vehicleRegNo: vehReg,
           vehicleOwnerName: owner,
           upTime,
+          upTripNo: upTrip?.tripNo,
           downTime,
+          downTripNo: downTrip?.tripNo,
           timeDiffDisplay,
           timeDiffMinutes,
           routeMerged,
+          distanceKmDisplay,
+          totalDistanceKm,
+          upSeatsAndFare,
+          upBookedSeats,
+          upFare,
+          downSeatsAndFare,
+          downBookedSeats,
+          downFare,
+          totalSeatsAndFare,
+          combinedSeats,
+          combinedFare,
           supervisorDisplay,
-          upTripNo: upTrip?.tripNo,
-          downTripNo: downTrip?.tripNo,
-          status: upTrip && downTrip ? 'সমন্বিত' : upTrip ? 'শুধুমাত্র আপ ট্রিপ' : 'শুধুমাত্র ডাউন ট্রিপ',
+          driverDisplay,
+          isFullTrip,
+          status: isFullTrip
+            ? 'সমন্বিত (রেগুলার পূর্ণাঙ্গ ট্রিপ)'
+            : upTrip
+            ? 'ডাউন ট্রিপ অপেক্ষমাণ'
+            : 'শুধুমাত্র ডাউন ট্রিপ',
         });
       }
+
+      // 3. Process today's Night Hold UP trips (initiated today, returning tomorrow)
+      // Rule: Will be counted tomorrow, shown today with awaiting tag
+      group.todayUpNightHold.forEach((upTrip) => {
+        const isNightHold = true;
+        const isFullTrip = false; // Returns tomorrow!
+        const dateDisplay = `${formatBengaliDate(date)} (আপ) [ফিরতি দিন: ${formatBengaliDate(tomorrow)}]`;
+        const upTime = `${upTrip.departureTime} ${upTrip.tripSequenceLabel ? `(${upTrip.tripSequenceLabel})` : ''}`;
+        const downTime = `আগামীকাল ফিরতি ট্রিপ (${formatBengaliDate(tomorrow)})`;
+        const timeDiffDisplay = 'আগামীকাল গণনা হবে';
+
+        const upRoute = upTrip.routeName || '';
+        const routeMerged = `${cleanRouteName(upRoute)} (নাইট হোল্ড আপ - ফিরতি দিন ট্রিপ সমন্বয়)`;
+
+        const upKm = getRouteDistance(routes, upTrip.routeId, upTrip.routeName);
+        const distanceKmDisplay = `${toBengaliDigits(upKm)} কিমি (আপ)`;
+
+        const upBookedSeats = upTrip.totalBookedSeats || 0;
+        const upFare = upTrip.totalCollection || 0;
+
+        const upSeatsAndFare = `${toBengaliDigits(upBookedSeats)} সিট | ${formatTaka(upFare)}`;
+        const downSeatsAndFare = '-';
+        const totalSeatsAndFare = `${toBengaliDigits(upBookedSeats)} সিট | ${formatTaka(upFare)}`;
+
+        rows.push({
+          id: `row-today-nh-${autoSl}-${vehReg}`,
+          autoSerial: autoSl++,
+          dateDisplay,
+          operationalDate: date,
+          isNightHold: true,
+          vehicleRegNo: vehReg,
+          vehicleOwnerName: upTrip.vehicleOwnerName || 'সাধারণ',
+          upTime,
+          upTripNo: upTrip.tripNo,
+          downTime,
+          downTripNo: undefined,
+          timeDiffDisplay,
+          timeDiffMinutes: 0,
+          routeMerged,
+          distanceKmDisplay,
+          totalDistanceKm: upKm,
+          upSeatsAndFare,
+          upBookedSeats,
+          upFare,
+          downSeatsAndFare,
+          downBookedSeats: 0,
+          downFare: 0,
+          totalSeatsAndFare,
+          combinedSeats: upBookedSeats,
+          combinedFare: upFare,
+          supervisorDisplay: upTrip.supervisor || '-',
+          driverDisplay: upTrip.driver || '-',
+          isFullTrip: false, // Counts on tomorrow's date!
+          status: 'নাইট হোল্ড (আগামীকাল ফিরতি দিনে ট্রিপ কাউন্ট হবে)',
+        });
+      });
     });
 
     return rows;
-  }, [schedules, date]);
+  }, [schedules, routes, date]);
 
   // Client Filtered Rows
   const filteredRows = tableRows.filter((row) => {
     if (vehicleFilter !== 'ALL' && row.vehicleRegNo !== vehicleFilter) return false;
-    if (nightHoldFilter === 'NIGHT_HOLD' && !row.isNightHold) return false;
-    if (nightHoldFilter === 'REGULAR' && row.isNightHold) return false;
+    if (tripTypeFilter === 'FULL_TRIPS' && !row.isFullTrip) return false;
+    if (tripTypeFilter === 'NIGHT_HOLD' && !row.isNightHold) return false;
+    if (tripTypeFilter === 'PENDING' && row.isFullTrip) return false;
 
     if (!searchTerm.trim()) return true;
     const term = searchTerm.toLowerCase();
@@ -284,22 +559,74 @@ export const DatabasePage: React.FC = () => {
       row.vehicleRegNo.toLowerCase().includes(term) ||
       row.routeMerged.toLowerCase().includes(term) ||
       row.supervisorDisplay.toLowerCase().includes(term) ||
+      row.driverDisplay.toLowerCase().includes(term) ||
       (row.vehicleOwnerName && row.vehicleOwnerName.toLowerCase().includes(term))
     );
   });
 
-  // Export CSV
+  // KPI Calculations
+  const stats = useMemo(() => {
+    const fullTrips = tableRows.filter((r) => r.isFullTrip).length;
+    const nightHoldTrips = tableRows.filter((r) => r.isNightHold && r.isFullTrip).length;
+    const pendingTrips = tableRows.filter((r) => !r.isFullTrip).length;
+    const totalSeats = tableRows.reduce((sum, r) => sum + r.combinedSeats, 0);
+    const totalFare = tableRows.reduce((sum, r) => sum + r.combinedFare, 0);
+    const totalDistance = tableRows.reduce((sum, r) => sum + r.totalDistanceKm, 0);
+
+    return {
+      fullTrips,
+      nightHoldTrips,
+      pendingTrips,
+      totalSeats,
+      totalFare,
+      totalDistance,
+    };
+  }, [tableRows]);
+
+  // Filtered rows totals for the table footer
+  const filteredTotals = useMemo(() => {
+    return filteredRows.reduce(
+      (acc, r) => {
+        acc.fullTrips += r.isFullTrip ? 1 : 0;
+        acc.distance += r.totalDistanceKm;
+        acc.upSeats += r.upBookedSeats;
+        acc.upFare += r.upFare;
+        acc.downSeats += r.downBookedSeats;
+        acc.downFare += r.downFare;
+        acc.totalSeats += r.combinedSeats;
+        acc.totalFare += r.combinedFare;
+        return acc;
+      },
+      {
+        fullTrips: 0,
+        distance: 0,
+        upSeats: 0,
+        upFare: 0,
+        downSeats: 0,
+        downFare: 0,
+        totalSeats: 0,
+        totalFare: 0,
+      }
+    );
+  }, [filteredRows]);
+
+  // Export CSV with UTF-8 BOM containing all 13 columns
   const handleExportCSV = () => {
     const headers = [
       'সিরিয়াল',
       'তারিখ',
-      'গাড়ি নম্বর',
-      'মালিকের নাম',
-      'আপ সময়',
-      'ডাউন সময়',
-      'সময় ব্যবধান',
-      'রুট সমন্বয়',
+      'গাড়ি নাম্বার',
+      'নাইট হোল্ড',
+      'আপ ট্রিপ সময়',
+      'ডাউন ট্রিপ সময়',
+      'সময় ব্যবধান (আপ-ডাউন)',
+      'রুট (আপ ট্রিপ + ডাউন ট্রিপ)',
+      'মোট দূরত্ব (কিমি)',
+      'আপ ট্রিপ সিট বুকিং ও ভাড়া',
+      'ডাউন ট্রিপ সিট বুকিং ও ভাড়া',
+      'মোট সিট বুকিং ও মোট ভাড়া',
       'সুপারভাইজার',
+      'ড্রাইভার',
       'স্ট্যাটাস',
     ];
 
@@ -307,23 +634,28 @@ export const DatabasePage: React.FC = () => {
       r.autoSerial,
       r.dateDisplay,
       r.vehicleRegNo,
-      r.vehicleOwnerName || 'সাধারণ',
+      r.isNightHold ? 'হ্যাঁ' : 'না',
       r.upTime,
       r.downTime,
       r.timeDiffDisplay,
-      r.routeMerged,
-      r.supervisorDisplay,
-      r.status,
+      `"${r.routeMerged}"`,
+      `"${r.distanceKmDisplay}"`,
+      `"${r.upSeatsAndFare}"`,
+      `"${r.downSeatsAndFare}"`,
+      `"${r.totalSeatsAndFare}"`,
+      `"${r.supervisorDisplay}"`,
+      `"${r.driverDisplay}"`,
+      `"${r.status}"`,
     ]);
 
     const csvContent =
       'data:text/csv;charset=utf-8,\uFEFF' +
-      [headers.join(','), ...rows.map((e) => e.map((val) => `"${val}"`).join(','))].join('\n');
+      [headers.join(','), ...rows.map((e) => e.join(','))].join('\n');
 
     const encodedUri = encodeURI(csvContent);
     const link = document.createElement('a');
     link.setAttribute('href', encodedUri);
-    link.setAttribute('download', `database_trip_register_${date}.csv`);
+    link.setAttribute('download', `trip_database_report_${date}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -357,10 +689,10 @@ export const DatabasePage: React.FC = () => {
             <span>সিস্টেম ডাটাবেইজ ও ট্রিপ সমন্বয় রেজিস্টার</span>
           </div>
           <h1 className="text-xl md:text-2xl font-black tracking-tight text-white">
-            ডাটাবেইজ — ট্রিপ শিডিউল, রুট সমন্বয় ও সময় ব্যবধান
+            ডাটাবেইজ — ট্রিপ সমন্বয়, নাইট হোল্ড ও পুর্নাঙ্গ রিপোর্ট
           </h1>
-          <p className="text-xs text-slate-300 mt-1">
-            স্বয়ংক্রিয় সিরিয়াল, নাইট হোল্ড তারিখ সমন্বয় (গতকাল+আজ), আপ/ডাউন সময় ব্যবধান এবং পূর্ণাঙ্গ রুট মার্জিং পর্যবেক্ষণ করুন।
+          <p className="text-xs text-slate-300 mt-1 max-w-2xl leading-relaxed">
+            মুল লক্ষ্য: আপ ও ডাউন ট্রিপ মিলে কয়টি ট্রিপ হলো তার নির্ভুল হিসাব। নাইট হোল্ড ট্রিপের ফিরতি দিনে ট্রিপ কাউন্ট, আপ-ডাউন সময় ব্যবধান, কিমি দূরত্ব এবং সিট ও ভাড়া সমষ্টিক হিসাব।
           </p>
         </div>
 
@@ -369,7 +701,7 @@ export const DatabasePage: React.FC = () => {
           <button
             type="button"
             onClick={fetchData}
-            className="p-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl transition-colors border border-slate-600"
+            className="p-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl transition-colors border border-slate-600 cursor-pointer"
             title="রিফ্রেশ"
           >
             <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
@@ -379,6 +711,7 @@ export const DatabasePage: React.FC = () => {
             type="button"
             onClick={handleExportCSV}
             className="px-3.5 py-2 bg-emerald-600/30 hover:bg-emerald-600/50 text-emerald-300 border border-emerald-500/40 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer"
+            title="১৩টি কলাম সহ এক্সেল ডাউনলোড"
           >
             <FileSpreadsheet className="w-4 h-4 text-emerald-400" />
             <span>এক্সেল (.CSV)</span>
@@ -388,6 +721,7 @@ export const DatabasePage: React.FC = () => {
             type="button"
             onClick={handlePrint}
             className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold shadow-md transition-all flex items-center gap-1.5 cursor-pointer"
+            title="পিডিএফ সংরক্ষণ বা প্রিন্ট করুন"
           >
             <Printer className="w-4 h-4" />
             <span>প্রিন্ট / সেভ PDF</span>
@@ -402,6 +736,97 @@ export const DatabasePage: React.FC = () => {
             <Sparkles className="w-3.5 h-3.5 text-purple-300" />
             <span>এআই ইনসাইটস</span>
           </button>
+        </div>
+      </div>
+
+      {/* KPI Summary Cards */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+        {/* Full Trips Count - PRIMARY OBJECTIVE */}
+        <div className="bg-emerald-50 border border-emerald-300 p-3.5 rounded-2xl shadow-xs">
+          <div className="flex items-center justify-between text-emerald-800 text-[11px] font-bold">
+            <span>আজকের পূর্ণাঙ্গ ট্রিপ</span>
+            <Award className="w-4 h-4 text-emerald-600" />
+          </div>
+          <div className="text-2xl font-black text-emerald-950 mt-1">
+            {toBengaliDigits(stats.fullTrips)} <span className="text-xs font-medium">টি</span>
+          </div>
+          <div className="text-[10px] text-emerald-700 mt-0.5">
+            আপ+ডাউন মিলে ১ ট্রিপ কাউন্ট
+          </div>
+        </div>
+
+        {/* Night Hold Trips */}
+        <div className="bg-purple-50 border border-purple-300 p-3.5 rounded-2xl shadow-xs">
+          <div className="flex items-center justify-between text-purple-800 text-[11px] font-bold">
+            <span>নাইট হোল্ড ট্রিপ</span>
+            <Moon className="w-4 h-4 text-purple-600" />
+          </div>
+          <div className="text-2xl font-black text-purple-950 mt-1">
+            {toBengaliDigits(stats.nightHoldTrips)} <span className="text-xs font-medium">টি</span>
+          </div>
+          <div className="text-[10px] text-purple-700 mt-0.5">
+            আজ সম্পন্ন ফিরতি ট্রিপ
+          </div>
+        </div>
+
+        {/* Total Booked Seats */}
+        <div className="bg-blue-50 border border-blue-300 p-3.5 rounded-2xl shadow-xs">
+          <div className="flex items-center justify-between text-blue-800 text-[11px] font-bold">
+            <span>মোট সিট বুকিং</span>
+            <User className="w-4 h-4 text-blue-600" />
+          </div>
+          <div className="text-2xl font-black text-blue-950 mt-1">
+            {toBengaliDigits(stats.totalSeats)} <span className="text-xs font-medium">টি</span>
+          </div>
+          <div className="text-[10px] text-blue-700 mt-0.5">
+            আপ ও ডাউন উভয় ট্রিপ
+          </div>
+        </div>
+
+        {/* Total Revenue */}
+        <div className="bg-amber-50 border border-amber-300 p-3.5 rounded-2xl shadow-xs">
+          <div className="flex items-center justify-between text-amber-800 text-[11px] font-bold">
+            <span>মোট আদায়কৃত ভাড়া</span>
+            <TrendingUp className="w-4 h-4 text-amber-600" />
+          </div>
+          <div className="text-xl font-black text-amber-950 mt-1">
+            {formatTaka(stats.totalFare)}
+          </div>
+          <div className="text-[10px] text-amber-700 mt-0.5">
+            কাউন্টার মোট সংগ্রহ
+          </div>
+        </div>
+
+        {/* Total Distance */}
+        <div className="bg-indigo-50 border border-indigo-300 p-3.5 rounded-2xl shadow-xs">
+          <div className="flex items-center justify-between text-indigo-800 text-[11px] font-bold">
+            <span>মোট অতিক্রান্ত দূরত্ব</span>
+            <RouteIcon className="w-4 h-4 text-indigo-600" />
+          </div>
+          <div className="text-2xl font-black text-indigo-950 mt-1">
+            {toBengaliDigits(stats.totalDistance)} <span className="text-xs font-medium">কিমি</span>
+          </div>
+          <div className="text-[10px] text-indigo-700 mt-0.5">
+            আপ রুট + ডাউন রুট কিমি
+          </div>
+        </div>
+
+        {/* Pending Trips */}
+        <div className={`p-3.5 rounded-2xl border shadow-xs transition-colors ${
+          stats.pendingTrips === 0 ? 'bg-emerald-50 border-emerald-300' : 'bg-slate-100 border-slate-300'
+        }`}>
+          <div className="flex items-center justify-between text-[11px] font-bold">
+            <span className={stats.pendingTrips === 0 ? 'text-emerald-800' : 'text-slate-700'}>
+              ফিরতি অপেক্ষমাণ
+            </span>
+            <Clock className={`w-4 h-4 ${stats.pendingTrips === 0 ? 'text-emerald-600' : 'text-slate-500'}`} />
+          </div>
+          <div className={`text-2xl font-black mt-1 ${stats.pendingTrips === 0 ? 'text-emerald-950' : 'text-slate-800'}`}>
+            {toBengaliDigits(stats.pendingTrips)} <span className="text-xs font-medium">টি</span>
+          </div>
+          <div className={`text-[10px] mt-0.5 ${stats.pendingTrips === 0 ? 'text-emerald-700 font-bold' : 'text-slate-500'}`}>
+            {stats.pendingTrips === 0 ? 'সকল ট্রিপ সমন্বিত (কোনো অপেক্ষমাণ নেই)' : 'ডাউন ট্রিপ এখনো তৈরি হয়নি'}
+          </div>
         </div>
       </div>
 
@@ -438,40 +863,51 @@ export const DatabasePage: React.FC = () => {
             </select>
           </div>
 
-          {/* Night Hold Filter */}
+          {/* Trip Type Filter */}
           <div className="flex bg-slate-100 p-1 rounded-xl text-xs font-bold border border-slate-200">
             <button
               type="button"
-              onClick={() => setNightHoldFilter('ALL')}
+              onClick={() => setTripTypeFilter('ALL')}
               className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
-                nightHoldFilter === 'ALL'
+                tripTypeFilter === 'ALL'
                   ? 'bg-slate-900 text-white shadow-xs'
                   : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              সব ট্রিপ
+              সব ট্রিপ ({toBengaliDigits(tableRows.length)})
             </button>
             <button
               type="button"
-              onClick={() => setNightHoldFilter('NIGHT_HOLD')}
+              onClick={() => setTripTypeFilter('FULL_TRIPS')}
               className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
-                nightHoldFilter === 'NIGHT_HOLD'
-                  ? 'bg-purple-600 text-white shadow-xs'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              নাইট হোল্ড
-            </button>
-            <button
-              type="button"
-              onClick={() => setNightHoldFilter('REGULAR')}
-              className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
-                nightHoldFilter === 'REGULAR'
+                tripTypeFilter === 'FULL_TRIPS'
                   ? 'bg-emerald-600 text-white shadow-xs'
                   : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              রেগুলার ট্রিপ
+              পূর্ণাঙ্গ ট্রিপ ({toBengaliDigits(stats.fullTrips)})
+            </button>
+            <button
+              type="button"
+              onClick={() => setTripTypeFilter('NIGHT_HOLD')}
+              className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
+                tripTypeFilter === 'NIGHT_HOLD'
+                  ? 'bg-purple-600 text-white shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              নাইট হোল্ড ({toBengaliDigits(stats.nightHoldTrips)})
+            </button>
+            <button
+              type="button"
+              onClick={() => setTripTypeFilter('PENDING')}
+              className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
+                tripTypeFilter === 'PENDING'
+                  ? 'bg-amber-600 text-white shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              ফিরতি বাকি ({toBengaliDigits(stats.pendingTrips)})
             </button>
           </div>
         </div>
@@ -483,7 +919,7 @@ export const DatabasePage: React.FC = () => {
             type="text"
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
-            placeholder="গাড়ি, রুট বা সুপারভাইজার..."
+            placeholder="গাড়ি, রুট, সুপারভাইজার বা ড্রাইভার..."
             className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs outline-none focus:bg-white focus:ring-1 focus:ring-emerald-500 font-medium"
           />
         </div>
@@ -499,17 +935,17 @@ export const DatabasePage: React.FC = () => {
             </div>
             <div>
               <h3 className="text-sm font-black text-slate-900">
-                ডাটাবেইজ সমন্বয় তালিকা ({toBengaliDigits(filteredRows.length)} টি রেকর্ড)
+                ডাটাবেইজ সমন্বয় রেজিস্টার ({toBengaliDigits(filteredRows.length)} টি রেকর্ড প্রদর্শিত)
               </h3>
               <p className="text-[11px] text-slate-500">
-                কলাম: সিরিয়াল (অটো) | তারিখ (গতকাল+আজ যদি নাইট হোল্ড) | সময় (আপ/ডাউন) | সময় ব্যাবধান | রুট সমন্বয় | সুপারভাইজার
+                ১৩টি কলাম: তারিখ | গাড়ি নম্বর | নাইট হোল্ড | আপ সময় | ডাউন সময় | সময় ব্যবধান | রুট সমন্বয় | মোট দূরত্ব | আপ সিট ও ভাড়া | ডাউন সিট ও ভাড়া | মোট সিট ও ভাড়া | সুপারভাইজার | ড্রাইভার
               </p>
             </div>
           </div>
 
-          <div className="text-[11px] font-semibold text-slate-600 flex items-center gap-1.5 bg-white px-3 py-1 rounded-xl border border-slate-200">
-            <Info className="w-3.5 h-3.5 text-blue-600" />
-            <span>সময় ব্যবধান = আপ টাইম হতে ডাউন টাইম বাদ (ঘণ্টা : মিনিট)</span>
+          <div className="text-[11px] font-semibold text-slate-600 flex items-center gap-1.5 bg-white px-3 py-1.5 rounded-xl border border-slate-200">
+            <Info className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+            <span>লজিক: আপ ও ডাউন ট্রিপ মিলে ওই গাড়ির ১টি পূর্ণাঙ্গ ট্রিপ কাউন্ট হবে। নাইট হোল্ড ট্রিপ ফিরতি দিনে গণনা হয়।</span>
           </div>
         </div>
 
@@ -520,146 +956,286 @@ export const DatabasePage: React.FC = () => {
           </div>
         ) : filteredRows.length === 0 ? (
           <div className="py-16 px-6 text-center bg-white">
-            <div className="w-14 h-14 rounded-2xl bg-slate-100 text-slate-400 flex items-center justify-center mx-auto mb-3">
-              <Database className="w-7 h-7" />
-            </div>
-            <h4 className="text-sm font-bold text-slate-800">ডাটাবেইজে কোনো ট্রিপ এন্ট্রি নেই</h4>
-            <p className="text-xs text-slate-500 max-w-md mx-auto mt-1">
-              ডিফল্ট ডামি ডাটা মুছে ফেলা হয়েছে। আপনি যখন <strong>শিডিউল মেকার</strong> থেকে গাড়ি ও ট্রিপ যোগ করবেন, তখন স্বয়ংক্রিয়ভাবে এখানে আপ ও ডাউন রুট সমন্বয় এবং সময় ব্যবধান গণনা হয়ে ডাটাবেইজে সংরক্ষিত হবে।
-            </p>
+            {tripTypeFilter === 'PENDING' ? (
+              <div className="max-w-md mx-auto p-6 bg-emerald-50 rounded-2xl border border-emerald-200">
+                <CheckCircle2 className="w-10 h-10 text-emerald-600 mx-auto mb-2" />
+                <h4 className="text-sm font-bold text-emerald-950">কোনো ট্রিপ অপেক্ষমাণ নেই!</h4>
+                <p className="text-xs text-emerald-700 mt-1">
+                  আজকের সকল গাড়ির আপ ও ডাউন ট্রিপ সফলভাবে সমন্বয় করা হয়েছে।
+                </p>
+              </div>
+            ) : (
+              <div>
+                <div className="w-14 h-14 rounded-2xl bg-slate-100 text-slate-400 flex items-center justify-center mx-auto mb-3">
+                  <Database className="w-7 h-7" />
+                </div>
+                <h4 className="text-sm font-bold text-slate-800">ডাটাবেইজে কোনো ট্রিপ এন্ট্রি নেই</h4>
+                <p className="text-xs text-slate-500 max-w-md mx-auto mt-1">
+                  শিডিউল মেকার থেকে আপ ট্রিপ ও ডাউন কাউন্টার থেকে ফিরতি ট্রিপ তৈরি হলে স্বয়ংক্রিয়ভাবে এখানে পুর্নাঙ্গ সমন্বিত ডাটা প্রদর্শিত হবে।
+                </p>
+              </div>
+            )}
           </div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full text-xs text-left">
-              <thead className="bg-slate-100/80 text-slate-700 font-bold border-b border-slate-200">
+            {/* Excel Spreadsheet Grid Table with 13 columns */}
+            <table className="w-full text-xs text-left border-collapse border border-slate-300">
+              <thead className="bg-slate-100 text-slate-700 font-bold border-b border-slate-300 sticky top-0 z-10">
                 <tr>
-                  <th className="px-4 py-3.5 text-center w-12">সিরিয়াল (অটো)</th>
-                  <th className="px-4 py-3.5">তারিখ</th>
-                  <th className="px-4 py-3.5">গাড়ি নম্বর ও মালিক</th>
-                  <th className="px-4 py-3.5">সময় (আপ / ডাউন)</th>
-                  <th className="px-4 py-3.5">সময় ব্যাবধান (ঘণ্টা : মিনিট)</th>
-                  <th className="px-4 py-3.5">রুট সমন্বয়</th>
-                  <th className="px-4 py-3.5">সুপারভাইজার</th>
+                  <th className="px-2.5 py-2.5 text-center w-10 border-r border-slate-300">ক্রমিক</th>
+                  <th className="px-2.5 py-2.5 border-r border-slate-300 min-w-[120px]">তারিখ</th>
+                  <th className="px-2.5 py-2.5 border-r border-slate-300 min-w-[130px]">গাড়ি নাম্বার</th>
+                  <th className="px-2.5 py-2.5 text-center border-r border-slate-300 min-w-[80px]">নাইট হোল্ড</th>
+                  <th className="px-2.5 py-2.5 border-r border-slate-300 min-w-[110px]">আপ ট্রিপ সময়</th>
+                  <th className="px-2.5 py-2.5 border-r border-slate-300 min-w-[110px]">ডাউন ট্রিপ সময়</th>
+                  <th className="px-2.5 py-2.5 text-center border-r border-slate-300 min-w-[110px]">সময় ব্যবধান (আপ-ডাউন)</th>
+                  <th className="px-2.5 py-2.5 border-r border-slate-300 min-w-[200px]">রুট (আপ + ডাউন)</th>
+                  <th className="px-2.5 py-2.5 border-r border-slate-300 min-w-[130px]">মোট দূরত্ব (কিমি)</th>
+                  <th className="px-2.5 py-2.5 border-r border-slate-300 min-w-[130px] bg-blue-50/50">আপ সিট ও ভাড়া</th>
+                  <th className="px-2.5 py-2.5 border-r border-slate-300 min-w-[130px] bg-emerald-50/50">ডাউন সিট ও ভাড়া</th>
+                  <th className="px-2.5 py-2.5 border-r border-slate-300 min-w-[140px] bg-amber-50/60 font-black">মোট সিট ও ভাড়া</th>
+                  <th className="px-2.5 py-2.5 border-r border-slate-300 min-w-[100px]">সুপারভাইজার</th>
+                  <th className="px-2.5 py-2.5 min-w-[100px]">ড্রাইভার</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-100">
+              <tbody className="divide-y divide-slate-200 font-medium">
                 {filteredRows.map((row) => (
-                  <tr key={row.id} className="hover:bg-slate-50/80 transition-colors">
-                    {/* Auto Serial */}
-                    <td className="px-4 py-3.5 text-center font-black text-slate-900 bg-slate-50/50">
-                      <span className="w-7 h-7 rounded-lg bg-emerald-50 text-emerald-800 border border-emerald-200 inline-flex items-center justify-center font-bold">
+                  <tr
+                    key={row.id}
+                    className={`hover:bg-blue-50/40 transition-colors ${
+                      row.isFullTrip ? 'bg-white' : 'bg-slate-50/60'
+                    }`}
+                  >
+                    {/* 1. ক্রমিক */}
+                    <td className="px-2.5 py-2 text-center font-bold text-slate-800 border-r border-slate-300">
+                      <span className="w-5 h-5 rounded bg-slate-100 text-slate-700 border border-slate-300 inline-flex items-center justify-center font-mono text-[11px]">
                         {toBengaliDigits(row.autoSerial)}
                       </span>
                     </td>
 
-                    {/* Date (Yesterday + Today if Night Hold) */}
-                    <td className="px-4 py-3.5">
-                      <div className="font-bold text-slate-900">{row.dateDisplay}</div>
+                    {/* 2. তারিখ */}
+                    <td className="px-2.5 py-2 border-r border-slate-300">
+                      <div className="font-bold text-slate-900 leading-tight">{row.dateDisplay}</div>
                       {row.isNightHold && (
-                        <span className="inline-flex items-center gap-1 text-[10px] text-purple-700 font-bold bg-purple-50 px-2 py-0.5 rounded-md mt-1 border border-purple-200">
-                          <Moon className="w-3 h-3 text-purple-600" />
-                          <span>নাইট হোল্ড টিক</span>
+                        <span className="inline-flex items-center gap-0.5 text-[9.5px] text-purple-700 font-bold bg-purple-50 px-1 rounded border border-purple-200 mt-0.5">
+                          <Moon className="w-2.5 h-2.5 text-purple-600" />
+                          <span>নাইট হোল্ড রিটার্ন</span>
                         </span>
                       )}
                     </td>
 
-                    {/* Vehicle Reg No & Owner */}
-                    <td className="px-4 py-3.5">
-                      <div className="font-black text-slate-900 font-mono flex items-center gap-1.5">
-                        <Bus className="w-3.5 h-3.5 text-slate-400" />
+                    {/* 3. গাড়ি নাম্বার */}
+                    <td className="px-2.5 py-2 border-r border-slate-300">
+                      <div className="font-black text-slate-900 font-mono flex items-center gap-1">
+                        <Bus className="w-3 h-3 text-slate-400" />
                         <span>{row.vehicleRegNo}</span>
                       </div>
-                      <div className="text-[11px] text-slate-500">
-                        মালিক: <strong className="text-slate-700">{row.vehicleOwnerName || 'সাধারণ'}</strong>
+                      <div className="text-[10px] text-slate-500">
+                        মালিক: <span className="font-semibold text-slate-700">{row.vehicleOwnerName || 'সাধারণ'}</span>
                       </div>
                     </td>
 
-                    {/* Time (UP / DOWN) */}
-                    <td className="px-4 py-3.5">
-                      <div className="flex flex-col gap-1 font-semibold">
-                        <span className="inline-flex items-center gap-1 text-blue-700 bg-blue-50 px-2 py-0.5 rounded text-[11px] font-bold">
-                          আপ: {row.upTime} {row.upTripNo ? `(${row.upTripNo})` : ''}
+                    {/* 4. নাইট হোল্ড */}
+                    <td className="px-2.5 py-2 text-center border-r border-slate-300">
+                      {row.isNightHold ? (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10.5px] font-bold bg-purple-100 text-purple-800 border border-purple-200 shadow-2xs">
+                          <Moon className="w-3 h-3" />
+                          <span>হ্যাঁ</span>
                         </span>
-                        <span className="inline-flex items-center gap-1 text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded text-[11px] font-bold">
-                          ডাউন: {row.downTime} {row.downTripNo ? `(${row.downTripNo})` : ''}
-                        </span>
-                      </div>
+                      ) : (
+                        <span className="text-slate-400 text-xs font-semibold">না</span>
+                      )}
                     </td>
 
-                    {/* Time Difference */}
-                    <td className="px-4 py-3.5">
-                      <div className="inline-flex items-center gap-1 px-3 py-1 rounded-xl bg-amber-50 text-amber-900 font-bold text-xs border border-amber-200">
-                        <Clock className="w-3.5 h-3.5 text-amber-600" />
+                    {/* 5. আপ ট্রিপ সময় */}
+                    <td className="px-2.5 py-2 border-r border-slate-300">
+                      <div className="font-bold text-blue-900">{row.upTime}</div>
+                      {row.upTripNo && (
+                        <div className="text-[10px] text-blue-600 font-mono">{row.upTripNo}</div>
+                      )}
+                    </td>
+
+                    {/* 6. ডাউন ট্রিপ সময় */}
+                    <td className="px-2.5 py-2 border-r border-slate-300">
+                      <div className={`font-bold ${row.downTime.includes('অপেক্ষমাণ') || row.downTime.includes('আগামীকাল') ? 'text-amber-700' : 'text-emerald-900'}`}>
+                        {row.downTime}
+                      </div>
+                      {row.downTripNo && (
+                        <div className="text-[10px] text-emerald-600 font-mono">{row.downTripNo}</div>
+                      )}
+                    </td>
+
+                    {/* 7. সময় ব্যবধান (আপ সময় - ডাউন সময়) */}
+                    <td className="px-2.5 py-2 text-center border-r border-slate-300">
+                      <div className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-50 text-amber-900 font-bold text-[11px] border border-amber-200">
+                        <Clock className="w-3 h-3 text-amber-600 shrink-0" />
                         <span>{row.timeDiffDisplay}</span>
                       </div>
                     </td>
 
-                    {/* Route Merged */}
-                    <td className="px-4 py-3.5">
-                      <div className="font-bold text-slate-900 text-xs bg-slate-50 p-2 rounded-xl border border-slate-200 leading-relaxed">
+                    {/* 8. রুট (আপ ট্রিপ রুট + ডাউন ট্রিপ রুট) */}
+                    <td className="px-2.5 py-2 border-r border-slate-300">
+                      <div className="font-semibold text-slate-900 text-[11px] leading-snug">
                         {row.routeMerged}
                       </div>
                     </td>
 
-                    {/* Supervisor */}
-                    <td className="px-4 py-3.5">
-                      <div className="font-bold text-slate-800 flex items-center gap-1">
-                        <User className="w-3.5 h-3.5 text-slate-400" />
+                    {/* 9. মোট দূরত্ব (আপ রুট কিমি + ডাউন ট্রিপ কিমি) */}
+                    <td className="px-2.5 py-2 border-r border-slate-300 font-semibold text-slate-800">
+                      <div className="flex items-center gap-1 font-mono text-[11px]">
+                        <RouteIcon className="w-3 h-3 text-indigo-500 shrink-0" />
+                        <span>{row.distanceKmDisplay}</span>
+                      </div>
+                    </td>
+
+                    {/* 10. আপ ট্রিপ সিট বুকিং সংখ্যা + মোট ভাড়া */}
+                    <td className="px-2.5 py-2 border-r border-slate-300 bg-blue-50/30">
+                      <div className="font-bold text-blue-900 text-xs">{row.upSeatsAndFare}</div>
+                    </td>
+
+                    {/* 11. ডাউন ট্রিপ সিট বুকিং সংখ্যা + মোট ভাড়া */}
+                    <td className="px-2.5 py-2 border-r border-slate-300 bg-emerald-50/30">
+                      <div className="font-bold text-emerald-900 text-xs">{row.downSeatsAndFare}</div>
+                    </td>
+
+                    {/* 12. মোট সিট বুকিং ও মোট ভাড়ার টাকা */}
+                    <td className="px-2.5 py-2 border-r border-slate-300 bg-amber-50/50">
+                      <div className="font-black text-slate-900 text-xs">{row.totalSeatsAndFare}</div>
+                    </td>
+
+                    {/* 13. সুপারভাইজার */}
+                    <td className="px-2.5 py-2 border-r border-slate-300 font-semibold text-slate-800">
+                      <div className="flex items-center gap-1">
+                        <User className="w-3 h-3 text-slate-400 shrink-0" />
                         <span>{row.supervisorDisplay}</span>
                       </div>
+                    </td>
+
+                    {/* 14. ড্রাইভার */}
+                    <td className="px-2.5 py-2 font-semibold text-slate-800">
+                      <span>{row.driverDisplay}</span>
                     </td>
                   </tr>
                 ))}
               </tbody>
+
+              {/* Table Summary Footer */}
+              <tfoot className="bg-slate-200 text-slate-900 font-black border-t-2 border-slate-400 text-xs">
+                <tr>
+                  <td colSpan={3} className="px-3 py-2.5 border-r border-slate-300 text-left font-bold">
+                    সর্বমোট: {toBengaliDigits(filteredRows.length)} টি রেকর্ড | পূর্ণাঙ্গ ট্রিপ: {toBengaliDigits(filteredTotals.fullTrips)} টি
+                  </td>
+                  <td className="px-2 py-2.5 border-r border-slate-300 text-center">-</td>
+                  <td className="px-2 py-2.5 border-r border-slate-300 text-center">-</td>
+                  <td className="px-2 py-2.5 border-r border-slate-300 text-center">-</td>
+                  <td className="px-2 py-2.5 border-r border-slate-300 text-center">-</td>
+                  <td className="px-2 py-2.5 border-r border-slate-300 text-center">-</td>
+                  <td className="px-2.5 py-2.5 border-r border-slate-300 font-mono text-indigo-900">
+                    {toBengaliDigits(filteredTotals.distance)} কিমি
+                  </td>
+                  <td className="px-2.5 py-2.5 border-r border-slate-300 text-blue-900">
+                    {toBengaliDigits(filteredTotals.upSeats)} সিট | {formatTaka(filteredTotals.upFare)}
+                  </td>
+                  <td className="px-2.5 py-2.5 border-r border-slate-300 text-emerald-900">
+                    {toBengaliDigits(filteredTotals.downSeats)} সিট | {formatTaka(filteredTotals.downFare)}
+                  </td>
+                  <td className="px-2.5 py-2.5 border-r border-slate-300 text-emerald-950 font-black bg-amber-100">
+                    {toBengaliDigits(filteredTotals.totalSeats)} সিট | {formatTaka(filteredTotals.totalFare)}
+                  </td>
+                  <td colSpan={2} className="px-3 py-2.5 text-center text-[11px] text-slate-600">
+                    সমন্বয় সম্পন্ন
+                  </td>
+                </tr>
+              </tfoot>
             </table>
           </div>
         )}
       </div>
 
       {/* Printable Sheet (hidden on screen, visible during window.print()) */}
-      <div id="printable-database-report" className="hidden print:block p-6 bg-white text-slate-900 font-sans space-y-4">
-        <div className="text-center border-b pb-4 space-y-1">
-          <h2 className="text-2xl font-black text-slate-900">কাউন্টার বুকিং ও বাস সার্ভিস</h2>
-          <p className="text-sm font-semibold text-slate-600">
-            ডাটাবেইজ — ট্রিপ শিডিউল, রুট সমন্বয় ও সময় ব্যবধান রেজিস্টার
+      <div id="printable-database-report" className="hidden print:block p-4 sm:p-6 bg-white text-slate-900 font-sans space-y-4">
+        <div className="text-center border-b-2 border-slate-800 pb-4 space-y-1">
+          <h2 className="text-2xl font-black text-slate-900 uppercase tracking-wide">
+            কাউন্টার ম্যানেজমেন্ট সিস্টেম ও বাস সার্ভিস
+          </h2>
+          <p className="text-xs font-bold text-slate-700">
+            ডাটাবেইজ — দৈনিক ট্রিপ শিডিউল, নাইট হোল্ড সমন্বয় ও পূর্ণাঙ্গ ট্রিপ রেজিস্টার
           </p>
-          <div className="text-xs font-bold text-slate-700">
-            তারিখ: {formatBengaliDate(date)} | মোট রেকর্ড: {toBengaliDigits(filteredRows.length)} টি
+          <div className="flex justify-between items-center text-xs font-bold text-slate-700 pt-2 border-t border-slate-200 mt-2">
+            <span>অপারেশনাল তারিখ: {formatBengaliDate(date)} ({date})</span>
+            <span>মোট পূর্ণাঙ্গ ট্রিপ: {toBengaliDigits(stats.fullTrips)} টি</span>
+            <span>সর্বমোট আদায়: {formatTaka(stats.totalFare)}</span>
           </div>
         </div>
 
-        <table className="w-full text-xs border-collapse border border-slate-300">
+        {/* Print 13-Column Table */}
+        <table className="w-full text-[10px] border-collapse border border-slate-400">
           <thead>
-            <tr className="bg-slate-100 font-bold border-b border-slate-300">
-              <th className="border border-slate-300 p-2 text-center w-12">সিরিয়াল</th>
-              <th className="border border-slate-300 p-2 text-left">তারিখ</th>
-              <th className="border border-slate-300 p-2 text-left">গাড়ি নম্বর</th>
-              <th className="border border-slate-300 p-2 text-left">সময় (আপ / ডাউন)</th>
-              <th className="border border-slate-300 p-2 text-center">সময় ব্যাবধান</th>
-              <th className="border border-slate-300 p-2 text-left">রুট সমন্বয়</th>
-              <th className="border border-slate-300 p-2 text-left">সুপারভাইজার</th>
+            <tr className="bg-slate-200 text-slate-900 font-bold border-b border-slate-400">
+              <th className="border border-slate-400 p-1 text-center w-7">ক্র.</th>
+              <th className="border border-slate-400 p-1 text-left">তারিখ</th>
+              <th className="border border-slate-400 p-1 text-left">গাড়ি নাম্বার</th>
+              <th className="border border-slate-400 p-1 text-center">নাইট হোল্ড</th>
+              <th className="border border-slate-400 p-1 text-left">আপ সময়</th>
+              <th className="border border-slate-400 p-1 text-left">ডাউন সময়</th>
+              <th className="border border-slate-400 p-1 text-center">ব্যবধান</th>
+              <th className="border border-slate-400 p-1 text-left">রুট (আপ + ডাউন)</th>
+              <th className="border border-slate-400 p-1 text-left">মোট দূরত্ব</th>
+              <th className="border border-slate-400 p-1 text-left">আপ সিট ও ভাড়া</th>
+              <th className="border border-slate-400 p-1 text-left">ডাউন সিট ও ভাড়া</th>
+              <th className="border border-slate-400 p-1 text-left font-black">মোট সিট ও ভাড়া</th>
+              <th className="border border-slate-400 p-1 text-left">সুপারভাইজার</th>
+              <th className="border border-slate-400 p-1 text-left">ড্রাইভার</th>
             </tr>
           </thead>
           <tbody>
             {filteredRows.map((row) => (
-              <tr key={row.id} className="border-b border-slate-200">
-                <td className="border border-slate-300 p-2 text-center font-bold">
+              <tr key={row.id} className="border-b border-slate-300">
+                <td className="border border-slate-400 p-1 text-center font-bold">
                   {toBengaliDigits(row.autoSerial)}
                 </td>
-                <td className="border border-slate-300 p-2">{row.dateDisplay}</td>
-                <td className="border border-slate-300 p-2 font-bold font-mono">{row.vehicleRegNo}</td>
-                <td className="border border-slate-300 p-2">
-                  <div>আপ: {row.upTime}</div>
-                  <div>ডাউন: {row.downTime}</div>
+                <td className="border border-slate-400 p-1 font-semibold">{row.dateDisplay}</td>
+                <td className="border border-slate-400 p-1 font-bold font-mono">{row.vehicleRegNo}</td>
+                <td className="border border-slate-400 p-1 text-center font-bold">
+                  {row.isNightHold ? 'হ্যাঁ' : 'না'}
                 </td>
-                <td className="border border-slate-300 p-2 text-center font-bold">{row.timeDiffDisplay}</td>
-                <td className="border border-slate-300 p-2 font-medium">{row.routeMerged}</td>
-                <td className="border border-slate-300 p-2">{row.supervisorDisplay}</td>
+                <td className="border border-slate-400 p-1">{row.upTime}</td>
+                <td className="border border-slate-400 p-1">{row.downTime}</td>
+                <td className="border border-slate-400 p-1 text-center font-bold">{row.timeDiffDisplay}</td>
+                <td className="border border-slate-400 p-1 font-medium">{row.routeMerged}</td>
+                <td className="border border-slate-400 p-1 font-mono">{row.distanceKmDisplay}</td>
+                <td className="border border-slate-400 p-1">{row.upSeatsAndFare}</td>
+                <td className="border border-slate-400 p-1">{row.downSeatsAndFare}</td>
+                <td className="border border-slate-400 p-1 font-bold">{row.totalSeatsAndFare}</td>
+                <td className="border border-slate-400 p-1">{row.supervisorDisplay}</td>
+                <td className="border border-slate-400 p-1">{row.driverDisplay}</td>
               </tr>
             ))}
+            {/* Grand Totals */}
+            <tr className="bg-slate-200 font-bold border-t-2 border-slate-500">
+              <td colSpan={3} className="border border-slate-400 p-1.5 text-left font-black">
+                সর্বমোট: {toBengaliDigits(filteredTotals.fullTrips)} টি পূর্ণাঙ্গ ট্রিপ
+              </td>
+              <td colSpan={5} className="border border-slate-400 p-1.5 text-right font-black">
+                মোট দূরত্ব: {toBengaliDigits(filteredTotals.distance)} কিমি
+              </td>
+              <td className="border border-slate-400 p-1.5 font-bold font-mono">
+                {toBengaliDigits(filteredTotals.upSeats)} সিট | {formatTaka(filteredTotals.upFare)}
+              </td>
+              <td className="border border-slate-400 p-1.5 font-bold font-mono">
+                {toBengaliDigits(filteredTotals.downSeats)} সিট | {formatTaka(filteredTotals.downFare)}
+              </td>
+              <td className="border border-slate-400 p-1.5 font-black font-mono">
+                {toBengaliDigits(filteredTotals.totalSeats)} সিট | {formatTaka(filteredTotals.totalFare)}
+              </td>
+              <td colSpan={2} className="border border-slate-400 p-1.5 text-center text-[9px]">
+                অডিট সম্পন্ন
+              </td>
+            </tr>
           </tbody>
         </table>
 
+        {/* Authorization Signatures */}
         <div className="pt-12 grid grid-cols-3 gap-8 text-center text-xs font-semibold text-slate-700">
           <div className="border-t border-slate-400 pt-1">ডাটা এন্ট্রি সহকারী</div>
           <div className="border-t border-slate-400 pt-1">ট্রাফিক কন্ট্রোলার</div>

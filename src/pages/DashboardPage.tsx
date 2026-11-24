@@ -1,7 +1,10 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { api } from '../services/api.ts';
-import type { AnalyticsSummary } from '../types/index.ts';
-import { formatTaka, toBengaliDigits, getTodayDhakaDate, formatBengaliDate } from '../utils/formatters.ts';
+import type { AnalyticsSummary, WeeklyTrendsSummary } from '../types/index.ts';
+import { useDataSync } from '../hooks/useDataSync.ts';
+import { formatTaka, toBengaliDigits, getTodayDhakaDate } from '../utils/formatters.ts';
+import { WeeklyTrendsChart } from '../components/WeeklyTrendsChart.tsx';
+import { getWeekStartSaturday, addDaysToDateStr } from '../components/WeeklyScheduleTimeline.tsx';
 import {
   Ticket,
   Armchair,
@@ -9,20 +12,22 @@ import {
   BadgeDollarSign,
   AlertCircle,
   Calendar,
-  Building2,
   TrendingUp,
   RefreshCw,
-  CheckCircle2,
   ArrowUpRight,
-  ArrowDownRight,
 } from 'lucide-react';
 
 export const DashboardPage: React.FC<{ onNavigateTo: (tab: any) => void }> = ({ onNavigateTo }) => {
   const [selectedDate, setSelectedDate] = useState<string>(getTodayDhakaDate());
+  const [weekStartDate, setWeekStartDate] = useState<string>(() =>
+    getWeekStartSaturday(getTodayDhakaDate())
+  );
   const [loading, setLoading] = useState<boolean>(true);
+  const [weeklyLoading, setWeeklyLoading] = useState<boolean>(true);
   const [summary, setSummary] = useState<AnalyticsSummary | null>(null);
+  const [weeklyTrends, setWeeklyTrends] = useState<WeeklyTrendsSummary | null>(null);
 
-  const fetchAnalytics = async (dateStr: string) => {
+  const fetchAnalytics = useCallback(async (dateStr: string) => {
     setLoading(true);
     try {
       const data = await api.getAnalyticsSummary(dateStr);
@@ -32,11 +37,44 @@ export const DashboardPage: React.FC<{ onNavigateTo: (tab: any) => void }> = ({ 
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  const fetchWeeklyTrends = useCallback(async (wStart: string) => {
+    setWeeklyLoading(true);
+    try {
+      const wEnd = addDaysToDateStr(wStart, 6);
+      const data = await api.getWeeklyTrends({ startDate: wStart, endDate: wEnd });
+      setWeeklyTrends(data);
+    } catch (err) {
+      console.error('Failed to load weekly trends:', err);
+    } finally {
+      setWeeklyLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     fetchAnalytics(selectedDate);
-  }, [selectedDate]);
+  }, [selectedDate, fetchAnalytics]);
+
+  useEffect(() => {
+    fetchWeeklyTrends(weekStartDate);
+  }, [weekStartDate, fetchWeeklyTrends]);
+
+  const handleDateChange = (newDate: string) => {
+    setSelectedDate(newDate);
+    setWeekStartDate(getWeekStartSaturday(newDate));
+  };
+
+  // Real-time synchronization
+  useDataSync(
+    useCallback(() => {
+      fetchAnalytics(selectedDate);
+      fetchWeeklyTrends(weekStartDate);
+    }, [selectedDate, weekStartDate, fetchAnalytics, fetchWeeklyTrends])
+  );
+
+  const currentWeekStart = getWeekStartSaturday(getTodayDhakaDate());
+  const isCurrentWeek = weekStartDate === currentWeekStart;
 
   return (
     <div className="space-y-6">
@@ -55,18 +93,21 @@ export const DashboardPage: React.FC<{ onNavigateTo: (tab: any) => void }> = ({ 
             <input
               type="date"
               value={selectedDate}
-              onChange={(e) => setSelectedDate(e.target.value)}
+              onChange={(e) => handleDateChange(e.target.value)}
               className="bg-transparent font-semibold text-slate-700 outline-none cursor-pointer"
             />
           </div>
 
           <button
             type="button"
-            onClick={() => fetchAnalytics(selectedDate)}
+            onClick={() => {
+              fetchAnalytics(selectedDate);
+              fetchWeeklyTrends(weekStartDate);
+            }}
             className="p-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl transition-colors"
             title="রিফ্রেশ করুন"
           >
-            <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+            <RefreshCw className={`w-4 h-4 ${loading || weeklyLoading ? 'animate-spin' : ''}`} />
           </button>
         </div>
       </div>
@@ -82,7 +123,7 @@ export const DashboardPage: React.FC<{ onNavigateTo: (tab: any) => void }> = ({ 
             </div>
           </div>
           <div>
-            <div className="text-xl sm:text-2xl font-black text-slate-900">
+            <div className="text-xl sm:text-2xl font-black text-slate-900 tabular-nums">
               {toBengaliDigits(summary?.totalBookings || 0)}
             </div>
             <span className="text-[11px] text-slate-400">টি সফল অর্ডার</span>
@@ -98,7 +139,7 @@ export const DashboardPage: React.FC<{ onNavigateTo: (tab: any) => void }> = ({ 
             </div>
           </div>
           <div>
-            <div className="text-xl sm:text-2xl font-black text-emerald-700">
+            <div className="text-xl sm:text-2xl font-black text-emerald-700 tabular-nums">
               {toBengaliDigits(summary?.seatsSold || 0)}
             </div>
             <span className="text-[11px] text-slate-400">টি আসন নিশ্চিত</span>
@@ -114,7 +155,7 @@ export const DashboardPage: React.FC<{ onNavigateTo: (tab: any) => void }> = ({ 
             </div>
           </div>
           <div>
-            <div className="text-xl sm:text-2xl font-black text-teal-800">
+            <div className="text-xl sm:text-2xl font-black text-teal-800 tabular-nums">
               {formatTaka(summary?.totalCollections || 0)}
             </div>
             <span className="text-[11px] text-slate-400">আজকের ক্যাশ মোট</span>
@@ -130,7 +171,7 @@ export const DashboardPage: React.FC<{ onNavigateTo: (tab: any) => void }> = ({ 
             </div>
           </div>
           <div>
-            <div className="text-xl sm:text-2xl font-black text-slate-900">
+            <div className="text-xl sm:text-2xl font-black text-slate-900 tabular-nums">
               {toBengaliDigits(summary?.activeTrips || 0)}
             </div>
             <span className="text-[11px] text-slate-400">টি বাস শিডিউল</span>
@@ -146,7 +187,7 @@ export const DashboardPage: React.FC<{ onNavigateTo: (tab: any) => void }> = ({ 
             </div>
           </div>
           <div>
-            <div className="text-xl sm:text-2xl font-black text-slate-900">
+            <div className="text-xl sm:text-2xl font-black text-slate-900 tabular-nums">
               {toBengaliDigits(summary?.ticketSales || 0)}
             </div>
             <span className="text-[11px] text-slate-400">টি ভাউচার</span>
@@ -162,13 +203,26 @@ export const DashboardPage: React.FC<{ onNavigateTo: (tab: any) => void }> = ({ 
             </div>
           </div>
           <div>
-            <div className="text-xl sm:text-2xl font-black text-amber-700">
+            <div className="text-xl sm:text-2xl font-black text-amber-700 tabular-nums">
               {toBengaliDigits(summary?.unreconciledTrips || 0)}
             </div>
             <span className="text-[11px] text-slate-400">সমন্বয় বাকি</span>
           </div>
         </div>
       </div>
+
+      {/* Weekly Ticket Sales & Fuel Expense Trends (Recharts) */}
+      <WeeklyTrendsChart
+        data={weeklyTrends}
+        loading={weeklyLoading}
+        selectedDate={selectedDate}
+        onShiftWeek={(deltaDays) =>
+          setWeekStartDate((prev) => addDaysToDateStr(prev, deltaDays))
+        }
+        onResetCurrentWeek={() => setWeekStartDate(currentWeekStart)}
+        isCurrentWeek={isCurrentWeek}
+        onNavigateTo={onNavigateTo}
+      />
 
       {/* Main Charts & Analytics Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -190,7 +244,7 @@ export const DashboardPage: React.FC<{ onNavigateTo: (tab: any) => void }> = ({ 
 
           <div className="space-y-4">
             {summary?.vehicleWiseCollections && summary.vehicleWiseCollections.length > 0 ? (
-              summary.vehicleWiseCollections.map((veh) => {
+              summary.vehicleWiseCollections.map((veh, idx) => {
                 const maxCol = Math.max(
                   1,
                   ...summary.vehicleWiseCollections.map((v) => v.total)
@@ -198,7 +252,7 @@ export const DashboardPage: React.FC<{ onNavigateTo: (tab: any) => void }> = ({ 
                 const percent = Math.min(100, Math.round((veh.total / maxCol) * 100));
 
                 return (
-                  <div key={veh.regNo} className="p-3 bg-slate-50 rounded-xl border border-slate-200/80">
+                  <div key={`${veh.regNo}-${idx}`} className="p-3 bg-slate-50 rounded-xl border border-slate-200/80">
                     <div className="flex items-center justify-between text-xs mb-1.5 font-bold">
                       <span className="text-slate-800">{veh.regNo}</span>
                       <span className="text-emerald-700">{formatTaka(veh.total)}</span>
@@ -261,13 +315,13 @@ export const DashboardPage: React.FC<{ onNavigateTo: (tab: any) => void }> = ({ 
 
           <div className="space-y-3">
             {summary?.counterWiseSales && summary.counterWiseSales.length > 0 ? (
-              summary.counterWiseSales.map((cnt) => {
+              summary.counterWiseSales.map((cnt, idx) => {
                 const totalRev = summary.totalCollections || 1;
                 const revShare = Math.round((cnt.totalRevenue / totalRev) * 100);
 
                 return (
                   <div
-                    key={cnt.counterCode}
+                    key={cnt.counterId ? cnt.counterId : `${cnt.counterCode}-${cnt.counterName}-${idx}`}
                     className="p-3 bg-slate-50 rounded-xl border border-slate-200/80 flex items-center justify-between gap-3"
                   >
                     <div className="flex items-center gap-2.5">

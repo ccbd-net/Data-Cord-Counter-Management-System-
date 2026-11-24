@@ -1,15 +1,27 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext.tsx';
 import { api } from '../services/api.ts';
-import type { Schedule, Vehicle } from '../types/index.ts';
+import type { Schedule, Vehicle, RouteItem, Driver } from '../types/index.ts';
+import { useDataSync } from '../hooks/useDataSync.ts';
 import {
   formatTaka,
   toBengaliDigits,
   getTodayDhakaDate,
   formatBengaliDate,
 } from '../utils/formatters.ts';
+import {
+  groupSchedulesByRouteNumber,
+  sortRoutesByNumber,
+  extractRouteNumber,
+  parseDepartureTimeToMinutes,
+} from '../utils/routeSort.ts';
 import { downloadDailyTripsPDF } from '../utils/pdfGenerator.ts';
 import { DigitalClockPicker } from '../components/DigitalClockPicker.tsx';
+import {
+  WeeklyScheduleTimeline,
+  getWeekStartSaturday,
+  addDaysToDateStr,
+} from '../components/WeeklyScheduleTimeline.tsx';
 import {
   CalendarDays,
   Calendar,
@@ -47,6 +59,8 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
   const [directionTab, setDirectionTab] = useState<'ALL' | 'PENDING_RETURN' | 'UP' | 'DOWN'>('ALL');
   const [selectedVehicle, setSelectedVehicle] = useState<string>('ALL');
   const [searchTerm, setSearchTerm] = useState<string>('');
+  const [displayMode, setDisplayMode] = useState<'excel' | 'cards' | 'weekly'>('excel');
+  const [weekStartDate, setWeekStartDate] = useState<string>(() => getWeekStartSaturday(getTodayDhakaDate()));
 
   // Data States
   const [schedules, setSchedules] = useState<Schedule[]>([]);
@@ -57,51 +71,65 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
   // Edit Schedule Modal State
   const [editingSchedule, setEditingSchedule] = useState<Schedule | null>(null);
   const [editTime, setEditTime] = useState<string>('07:00 AM');
+  const [editRouteId, setEditRouteId] = useState<string>('');
   const [editSupervisor, setEditSupervisor] = useState<string>('');
   const [editSupervisorPhone, setEditSupervisorPhone] = useState<string>('');
   const [editFare, setEditFare] = useState<number>(550);
   const [editReason, setEditReason] = useState<string>('');
 
-  // Return Trip (ফিরতি দিন) Quick Modal State
+  // Return Trip (ফিরতি ট্রিপ) Quick Modal State
   const [returnModalTrip, setReturnModalTrip] = useState<Schedule | null>(null);
   const [returnDate, setReturnDate] = useState<string>(getTodayDhakaDate());
   const [returnTime, setReturnTime] = useState<string>('08:30 PM');
+  const [returnRouteId, setReturnRouteId] = useState<string>('');
   const [returnSupervisor, setReturnSupervisor] = useState<string>('');
+  const [returnDriver, setReturnDriver] = useState<string>('');
+  const [returnFare, setReturnFare] = useState<number>(550);
   const [creatingReturn, setCreatingReturn] = useState<boolean>(false);
 
   // Print / PDF Report Modal
   const [showReportModal, setShowReportModal] = useState<boolean>(false);
 
-  // Load vehicles and supervisors list
+  // Load vehicles, routes, supervisors and drivers list
   const [supervisorsList, setSupervisorsList] = useState<{ id: string; name: string }[]>([]);
+  const [driversList, setDriversList] = useState<Driver[]>([]);
+  const [routesList, setRoutesList] = useState<RouteItem[]>([]);
+
+  const fetchPrereqs = useCallback(async () => {
+    try {
+      const [vList, sRes, rRes, dRes] = await Promise.all([
+        api.getVehicles(),
+        api.getSupervisors(),
+        api.getRoutes(),
+        api.getDrivers(),
+      ]);
+      setVehicles(vList.vehicles);
+      setSupervisorsList(sRes.supervisors || []);
+      setRoutesList(sortRoutesByNumber(rRes.routes || []));
+      setDriversList(dRes.drivers || []);
+    } catch (err) {
+      console.error('Failed to load vehicles, routes or supervisors:', err);
+    }
+  }, []);
 
   useEffect(() => {
-    const fetchPrereqs = async () => {
-      try {
-        const [vList, sRes] = await Promise.all([
-          api.getVehicles(),
-          api.getSupervisors(),
-        ]);
-        setVehicles(vList.vehicles);
-        setSupervisorsList(sRes.supervisors || []);
-      } catch (err) {
-        console.error('Failed to load vehicles or supervisors:', err);
-      }
-    };
     fetchPrereqs();
-  }, []);
+  }, [fetchPrereqs]);
 
   // Fetch schedules with flexible filters
   const fetchSchedules = async () => {
     setLoading(true);
     try {
       const params: any = {};
-      if (dateMode === 'single') {
+      if (displayMode === 'weekly') {
+        params.startDate = weekStartDate;
+        params.endDate = addDaysToDateStr(weekStartDate, 6);
+      } else if (dateMode === 'single') {
         params.date = date;
       } else {
         params.startDate = startDate;
       }
-      if (dateMode === 'range' && endDate) {
+      if (displayMode !== 'weekly' && dateMode === 'range' && endDate) {
         params.endDate = endDate;
       }
       if (directionTab === 'UP' || directionTab === 'DOWN') {
@@ -122,13 +150,73 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
 
   useEffect(() => {
     fetchSchedules();
-  }, [dateMode, date, startDate, endDate, directionTab, selectedVehicle]);
+  }, [displayMode, weekStartDate, dateMode, date, startDate, endDate, directionTab, selectedVehicle]);
+
+  // Real-time synchronization across pages and tabs
+  useDataSync(
+    useCallback(() => {
+      fetchSchedules();
+      fetchPrereqs();
+    }, [displayMode, weekStartDate, dateMode, date, startDate, endDate, directionTab, selectedVehicle, fetchPrereqs])
+  );
+
+  // Quick / Drag-and-drop reassignment handler for Weekly Timeline
+  const handleReassignTrip = async (
+    scheduleId: string,
+    updates: {
+      date?: string;
+      vehicleId?: string;
+      departureTime?: string;
+      supervisor?: string;
+      fare?: number;
+      updateReason?: string;
+    }
+  ) => {
+    try {
+      const res = await api.updateSchedule(scheduleId, updates);
+      if (res.success && res.schedule) {
+        setActionSuccessMsg(
+          `সফল! ট্রিপ ${res.schedule.tripNo} (${res.schedule.vehicleRegNo}, তারিখ: ${res.schedule.date}, সময়: ${res.schedule.departureTime}) সফলভাবে পুনর্বিন্যাস করা হয়েছে।`
+        );
+      }
+      await fetchSchedules();
+    } catch (err: any) {
+      alert(err.message || 'ট্রিপ পুনর্বিন্যাস করতে সমস্যা হয়েছে।');
+    }
+  };
 
   const handleOpenReturnModal = (trip: Schedule) => {
     setReturnModalTrip(trip);
-    setReturnDate(trip.date || getTodayDhakaDate());
+    let defaultReturnDate = trip.date || getTodayDhakaDate();
+    if (trip.isNightHold) {
+      if (trip.nightHoldNextDate) {
+        defaultReturnDate = trip.nightHoldNextDate;
+      } else {
+        try {
+          const d = new Date(trip.date);
+          d.setDate(d.getDate() + 1);
+          defaultReturnDate = d.toISOString().split('T')[0];
+        } catch {}
+      }
+    }
+    setReturnDate(defaultReturnDate);
     setReturnTime('08:30 PM');
     setReturnSupervisor(trip.supervisor || '');
+    setReturnDriver(trip.driver || '');
+
+    // Pick best matching DOWN route (prefer same route number if present, otherwise first active DOWN route)
+    const activeDownRoutes = sortRoutesByNumber(
+      routesList.filter((r) => r.status === 'active' && r.direction === 'DOWN')
+    );
+    const upNum = extractRouteNumber(trip.routeName);
+    const matchingNumberRoute =
+      upNum !== Number.MAX_SAFE_INTEGER
+        ? activeDownRoutes.find((r) => extractRouteNumber(r.name) === upNum)
+        : undefined;
+    const defaultRoute = matchingNumberRoute || activeDownRoutes[0] || routesList.find((r) => r.status === 'active');
+
+    setReturnRouteId(defaultRoute?.id || '');
+    setReturnFare(defaultRoute?.baseFare || trip.fare || 550);
     setActionSuccessMsg('');
   };
 
@@ -143,13 +231,16 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
         date: returnDate,
         departureTime: returnTime,
         vehicleId: returnModalTrip.vehicleId,
+        routeId: returnRouteId || undefined,
         direction: 'DOWN',
         supervisor: returnSupervisor || returnModalTrip.supervisor,
+        driver: returnDriver || returnModalTrip.driver || undefined,
+        fare: returnFare || undefined,
         linkedTripId: returnModalTrip.id,
       });
 
       setActionSuccessMsg(
-        `সফল! গাড়ি: ${returnModalTrip.vehicleRegNo} এর ফিরতি ডাউন ট্রিপ (${res.schedule.tripNo}) শিডিউল তৈরি হয়েছে। আপ ও ডাউন মিলে ১টি পূর্ণাঙ্গ ট্রিপ সম্পন্ন।`
+        `সফল! গাড়ি: ${returnModalTrip.vehicleRegNo} এর ফিরতি ট্রিপ (${res.schedule.tripNo}, রুট: ${res.schedule.routeName}) তৈরি হয়েছে। আপ ও ডাউন মিলে ১টি পূর্ণাঙ্গ ট্রিপ সম্পন্ন।`
       );
       setReturnModalTrip(null);
       await fetchSchedules();
@@ -167,6 +258,7 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
   const handleOpenEdit = (sch: Schedule) => {
     setEditingSchedule(sch);
     setEditTime(sch.departureTime || '07:00 AM');
+    setEditRouteId(sch.routeId || '');
     setEditSupervisor(sch.supervisor || '');
     setEditSupervisorPhone(sch.supervisorPhone || '');
     setEditFare(sch.fare || 0);
@@ -181,6 +273,7 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
     try {
       await api.updateSchedule(editingSchedule.id, {
         departureTime: editTime,
+        routeId: editRouteId || undefined,
         supervisor: editSupervisor,
         supervisorPhone: editSupervisorPhone,
         fare: editFare,
@@ -206,30 +299,38 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
     }
   };
 
-  // Pending Return Trips: All active UP trips where returnTripCreated is not true
+  // Pending Return Trips: All active UP trips where returnTripCreated is not true and not reconciled
   const pendingReturnTrips = schedules.filter(
-    (s) => s.direction === 'UP' && !s.returnTripCreated && s.status !== 'cancelled'
+    (s) => s.direction === 'UP' && !s.returnTripCreated && !s.reconciled && s.status !== 'cancelled'
   );
 
-  // Client-side search filtering
-  const filtered = schedules.filter((s) => {
-    if (selectedVehicle !== 'ALL' && s.vehicleRegNo !== selectedVehicle) {
-      return false;
-    }
-    if (directionTab === 'UP' && s.direction !== 'UP') return false;
-    if (directionTab === 'DOWN' && s.direction !== 'DOWN') return false;
-    if (directionTab === 'PENDING_RETURN' && !(s.direction === 'UP' && !s.returnTripCreated)) return false;
+  // Client-side search filtering + route number & time sorting
+  const filtered = schedules
+    .filter((s) => {
+      if (selectedVehicle !== 'ALL' && s.vehicleRegNo !== selectedVehicle) {
+        return false;
+      }
+      if (directionTab === 'UP' && s.direction !== 'UP') return false;
+      if (directionTab === 'DOWN' && s.direction !== 'DOWN') return false;
+      if (directionTab === 'PENDING_RETURN' && !(s.direction === 'UP' && !s.returnTripCreated && !s.reconciled)) return false;
 
-    if (!searchTerm.trim()) return true;
-    const term = searchTerm.toLowerCase();
-    return (
-      s.tripNo.toLowerCase().includes(term) ||
-      s.vehicleRegNo.toLowerCase().includes(term) ||
-      s.supervisor.toLowerCase().includes(term) ||
-      s.routeName.toLowerCase().includes(term) ||
-      (s.vehicleOwnerName && s.vehicleOwnerName.toLowerCase().includes(term))
-    );
-  });
+      if (!searchTerm.trim()) return true;
+      const term = searchTerm.toLowerCase();
+      return (
+        s.tripNo.toLowerCase().includes(term) ||
+        s.vehicleRegNo.toLowerCase().includes(term) ||
+        s.supervisor.toLowerCase().includes(term) ||
+        s.routeName.toLowerCase().includes(term) ||
+        (s.vehicleOwnerName && s.vehicleOwnerName.toLowerCase().includes(term))
+      );
+    })
+    .sort((a, b) => {
+      const rA = extractRouteNumber(a.routeName);
+      const rB = extractRouteNumber(b.routeName);
+      if (rA !== rB) return rA - rB;
+      if (a.date !== b.date) return a.date.localeCompare(b.date);
+      return parseDepartureTimeToMinutes(a.departureTime) - parseDepartureTimeToMinutes(b.departureTime);
+    });
 
   // Calculate Metrics
   const upTrips = filtered.filter((s) => s.direction === 'UP');
@@ -286,6 +387,11 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
   });
 
   const vehicleStatsList = Object.values(vehicleStatsMap);
+
+  // Group trips by Route Number (1, 2, 3...) and sort chronologically by departure time
+  type RouteTripGroup = ReturnType<typeof groupSchedulesByRouteNumber>[number];
+  const upRouteGroups = groupSchedulesByRouteNumber(upTrips);
+  const downRouteGroups = groupSchedulesByRouteNumber(downTrips);
 
   // Export CSV (Excel)
   const handleExportCSV = () => {
@@ -685,7 +791,7 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
                 </h3>
               </div>
               <p className="text-[11px] text-slate-500 mt-0.5">
-                &quot;ফিরতি দিন&quot; চেপে ডাউন রুট ও সময় দিন। আপ ও ডাউন মিলে ওই গাড়ির ১টি পূর্ণাঙ্গ ট্রিপ কাউন্ট হবে।
+                &quot;ফিরতি ট্রিপ&quot; চেপে ডাউন রুট, তারিখ ও সময় দিন। আপ ও ডাউন মিলে ওই গাড়ির ১টি পূর্ণাঙ্গ ট্রিপ কাউন্ট হবে।
               </p>
             </div>
             <div className="text-[11px] text-amber-700 font-semibold bg-amber-50 px-3 py-1 rounded-xl border border-amber-200 shrink-0">
@@ -737,7 +843,7 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
                         onClick={() => handleOpenReturnModal(trip)}
                         className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-bold text-xs shadow-xs hover:shadow-md transition-all inline-flex items-center gap-1 cursor-pointer"
                       >
-                        <span>➔ ফিরতি দিন</span>
+                        <span>➔ ফিরতি ট্রিপ</span>
                       </button>
                     </td>
                   </tr>
@@ -748,210 +854,504 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
         </div>
       )}
 
-      {/* Schedules Cards / Grid */}
-      <div className="flex items-center justify-between pt-2">
+      {/* Schedules Cards / Excel Table View */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-2">
         <h3 className="text-sm font-black text-slate-800 flex items-center gap-2">
-          <span>ট্রিপের তালিকা</span>
+          <span>ট্রিপের পূর্ণাঙ্গ তালিকা</span>
           <span className="px-2 py-0.5 rounded-full text-xs font-bold bg-slate-100 text-slate-700 border border-slate-200">
-            {toBengaliDigits(filtered.length)}
+            {toBengaliDigits(filtered.length)} টি ট্রিপ
           </span>
         </h3>
+
+        {/* View Toggle */}
+        <div className="flex flex-wrap items-center gap-1 bg-slate-100 p-1 rounded-xl border border-slate-200 text-xs font-bold">
+          <button
+            type="button"
+            onClick={() => setDisplayMode('excel')}
+            className={`px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-all cursor-pointer whitespace-nowrap ${
+              displayMode === 'excel'
+                ? 'bg-slate-900 text-white shadow-xs'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <FileSpreadsheet className="w-3.5 h-3.5" />
+            <span>এক্সেল শিট ভিউ</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setDisplayMode('weekly')}
+            className={`px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-all cursor-pointer whitespace-nowrap ${
+              displayMode === 'weekly'
+                ? 'bg-indigo-600 text-white shadow-xs'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <CalendarDays className="w-3.5 h-3.5" />
+            <span>সাপ্তাহিক ক্যালেন্ডার</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setDisplayMode('cards')}
+            className={`px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-all cursor-pointer whitespace-nowrap ${
+              displayMode === 'cards'
+                ? 'bg-slate-900 text-white shadow-xs'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <Layers className="w-3.5 h-3.5" />
+            <span>কার্ড ভিউ</span>
+          </button>
+        </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {filtered.length === 0 ? (
-          <div className="col-span-full py-16 text-center bg-white rounded-3xl border border-dashed border-slate-300 text-xs text-slate-400">
-            নির্বাচিত ফিল্টারে কোনো ট্রিপ শিডিউল পাওয়া যায়নি।
-          </div>
-        ) : (
-          filtered.map((sch) => {
-            const booked = sch.totalBookedSeats || 0;
-            const available = sch.seatCapacity - booked;
-            const percent = Math.round((booked / sch.seatCapacity) * 100);
-
-            return (
-              <div
-                key={sch.id}
-                className="bg-white rounded-3xl border border-slate-200 shadow-xs p-5 hover:shadow-md transition-all relative overflow-hidden flex flex-col justify-between"
-              >
-                <div>
-                  {/* Top Header of Card */}
-                  <div className="flex items-center justify-between pb-3 border-b">
+      {/* WEEKLY CALENDAR TIMELINE VIEW */}
+      {displayMode === 'weekly' ? (
+        <WeeklyScheduleTimeline
+          schedules={filtered}
+          vehicles={vehicles}
+          supervisorsList={supervisorsList}
+          weekStartDate={weekStartDate}
+          onChangeWeekStartDate={setWeekStartDate}
+          canManageTrips={canManageTrips}
+          loading={loading}
+          onReassignTrip={handleReassignTrip}
+          onSelectTripForBooking={onSelectTripForBooking}
+        />
+      ) : displayMode === 'excel' ? (
+        <div className="space-y-8">
+          {/* Helper function to render a route table */}
+          {(() => {
+            const renderRouteTable = (group: RouteTripGroup, direction: 'UP' | 'DOWN') => {
+              return (
+                <div
+                  key={`${direction}-${group.routeNumber}`}
+                  className="mb-6 bg-white rounded-2xl border border-slate-300 shadow-xs overflow-hidden"
+                >
+                  {/* Route Header Banner */}
+                  <div
+                    className={`px-4 py-2.5 border-b flex flex-col sm:flex-row sm:items-center justify-between gap-2 ${
+                      direction === 'UP'
+                        ? 'bg-blue-50/90 border-blue-200 text-blue-900'
+                        : 'bg-emerald-50/90 border-emerald-200 text-emerald-900'
+                    }`}
+                  >
                     <div className="flex items-center gap-2">
                       <span
-                        className={`w-9 h-9 rounded-2xl font-black text-xs flex items-center justify-center text-white ${
-                          sch.direction === 'UP' ? 'bg-blue-600' : 'bg-emerald-600'
+                        className={`px-2.5 py-0.5 rounded text-xs font-black text-white shadow-2xs ${
+                          direction === 'UP' ? 'bg-blue-700' : 'bg-emerald-700'
                         }`}
                       >
-                        {sch.direction}
+                        {toBengaliDigits(group.routeNumber)} নং রুট
                       </span>
-                      <div>
-                        <div className="flex items-center gap-1.5">
-                          <h4 className="font-bold text-sm text-slate-900">{sch.tripNo}</h4>
-                          {sch.tripSequenceLabel && (
-                            <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-amber-100 text-amber-800 border border-amber-300">
-                              {sch.tripSequenceLabel}
-                            </span>
-                          )}
-                        </div>
-                        <span className="text-[10px] text-slate-400">তারিখ: {sch.date}</span>
-                      </div>
+                      <h4 className="font-bold text-sm tracking-wide">
+                        {group.routeName}
+                      </h4>
                     </div>
-
-                    <div className="text-right">
-                      <span className="inline-flex items-center gap-1 px-3 py-1 bg-emerald-50 text-emerald-800 text-xs font-bold rounded-xl border border-emerald-200">
-                        <Clock className="w-3 h-3 text-emerald-600" />
-                        <span>{sch.departureTime}</span>
-                      </span>
+                    <div className="text-xs font-semibold flex items-center gap-2">
+                      <span className="text-slate-500 font-normal">রুট ট্রিপ সংখ্যা:</span>
+                      <strong className="px-2 py-0.5 bg-white rounded-md border border-slate-200 shadow-2xs">
+                        {toBengaliDigits(group.trips.length)} টি
+                      </strong>
+                      <span className="text-[11px] text-slate-500 hidden sm:inline">(সময় অনুযায়ী ১, ২, ৩ ক্রমিক)</span>
                     </div>
                   </div>
 
-                  {/* Details Body */}
-                  <div className="py-3 space-y-2 text-xs">
-                    <div className="flex items-center justify-between">
-                      <span className="text-slate-500">গাড়ি নম্বর:</span>
-                      <span className="font-black text-slate-900">{sch.vehicleRegNo}</span>
-                    </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="bg-slate-100 border-b border-slate-300 text-slate-700 font-bold uppercase text-[11px]">
+                          <th className="py-2.5 px-3 border-r border-slate-300 text-center w-14">সিরিয়াল</th>
+                          <th className="py-2.5 px-3 border-r border-slate-300">ট্রিপ নং</th>
+                          <th className="py-2.5 px-3 border-r border-slate-300">ছাড়ার সময়</th>
+                          <th className="py-2.5 px-3 border-r border-slate-300">গাড়ি নম্বর</th>
+                          <th className="py-2.5 px-3 border-r border-slate-300">মালিকের নাম</th>
+                          <th className="py-2.5 px-3 border-r border-slate-300">সুপারভাইজার</th>
+                          <th className="py-2.5 px-3 border-r border-slate-300">ড্রাইভার</th>
+                          <th className="py-2.5 px-3 border-r border-slate-300 text-center">সিট বুকিং</th>
+                          <th className="py-2.5 px-3 border-r border-slate-300 text-right">ভাড়া</th>
+                          <th className="py-2.5 px-3 border-r border-slate-300 text-center">ফিরতি / সমন্বয়</th>
+                          <th className="py-2.5 px-3 text-right">পদক্ষেপ</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-200 font-medium">
+                        {group.trips.map((sch) => {
+                          const booked = sch.totalBookedSeats || 0;
+                          const percent = Math.round((booked / sch.seatCapacity) * 100);
 
-                    {sch.vehicleOwnerName && (
-                      <div className="flex items-center justify-between">
-                        <span className="text-slate-500">গাড়ির মালিক:</span>
-                        <span className="font-semibold text-slate-800">{sch.vehicleOwnerName}</span>
+                          return (
+                            <tr key={sch.id} className="hover:bg-blue-50/40 transition-colors">
+                              <td className="py-2.5 px-3 border-r border-slate-200 text-center font-mono font-bold text-slate-800 bg-slate-50/60">
+                                {toBengaliDigits(sch.serialInRoute)}
+                              </td>
+                              <td className="py-2.5 px-3 border-r border-slate-200 font-mono font-bold text-slate-900">
+                                {sch.tripNo}
+                              </td>
+                              <td className="py-2.5 px-3 border-r border-slate-200">
+                                <span className="font-bold text-slate-900 text-xs px-2 py-0.5 rounded bg-slate-100 font-mono">
+                                  {sch.departureTime}
+                                </span>
+                                <span className="text-[10px] text-slate-500 block font-normal mt-0.5">
+                                  {sch.date}
+                                </span>
+                              </td>
+                              <td className="py-2.5 px-3 border-r border-slate-200 font-bold text-slate-900">
+                                <div>{sch.vehicleRegNo}</div>
+                                <span className="text-[10px] text-slate-500 font-normal">
+                                  {toBengaliDigits(sch.seatCapacity)} সিট
+                                </span>
+                              </td>
+                              <td className="py-2.5 px-3 border-r border-slate-200 text-slate-700">
+                                {sch.vehicleOwnerName || 'সাধারণ'}
+                              </td>
+                              <td className="py-2.5 px-3 border-r border-slate-200 text-slate-800">
+                                <div>{sch.supervisor || 'অনির্ধারিত'}</div>
+                                {sch.supervisorPhone && (
+                                  <div className="text-[10px] text-slate-500">{sch.supervisorPhone}</div>
+                                )}
+                              </td>
+                              <td className="py-2.5 px-3 border-r border-slate-200 text-slate-800">
+                                {sch.driver || 'অনির্ধারিত'}
+                              </td>
+                              <td className="py-2.5 px-3 border-r border-slate-200 text-center">
+                                <div className="font-bold text-slate-800">
+                                  {toBengaliDigits(booked)}/{toBengaliDigits(sch.seatCapacity)}
+                                </div>
+                                <div className="text-[10px] text-slate-500 font-semibold">
+                                  {toBengaliDigits(percent)}% পূর্ণ
+                                </div>
+                              </td>
+                              <td className="py-2.5 px-3 border-r border-slate-200 text-right font-bold text-emerald-700">
+                                {formatTaka(sch.fare)}
+                              </td>
+                              <td className="py-2.5 px-3 border-r border-slate-200 text-center">
+                                {sch.direction === 'UP' && !sch.returnTripCreated && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleOpenReturnModal(sch)}
+                                    className="px-2.5 py-1 bg-amber-500 hover:bg-amber-600 text-white rounded text-[11px] font-bold shadow-xs cursor-pointer inline-flex items-center gap-1"
+                                  >
+                                    <span>➔ ফিরতি ট্রিপ</span>
+                                  </button>
+                                )}
+                                {sch.direction === 'UP' && sch.returnTripCreated && (
+                                  <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200 inline-flex items-center gap-1">
+                                    <CheckCircle className="w-3 h-3 text-emerald-600" />
+                                    <span>১টি পূর্ণাঙ্গ ট্রিপ সম্পন্ন</span>
+                                  </span>
+                                )}
+                                {sch.direction === 'DOWN' && sch.linkedTripId && (
+                                  <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-100 text-blue-800 border border-blue-200 inline-flex items-center gap-1">
+                                    <ArrowRight className="w-3 h-3 text-blue-600" />
+                                    <span>ফিরতি ডাউন (সমন্বয়কৃত)</span>
+                                  </span>
+                                )}
+                                {sch.direction === 'DOWN' && !sch.linkedTripId && (
+                                  <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-slate-100 text-slate-600 border border-slate-200">
+                                    স্বতন্ত্র ডাউন
+                                  </span>
+                                )}
+                              </td>
+                              <td className="py-2.5 px-3 text-right">
+                                <div className="flex items-center justify-end gap-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      if (onSelectTripForBooking) onSelectTripForBooking(sch.id);
+                                    }}
+                                    className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-[11px] font-bold shadow-xs cursor-pointer inline-flex items-center gap-1"
+                                  >
+                                    <Armchair className="w-3 h-3" />
+                                    <span>বুকিং</span>
+                                  </button>
+                                  {canManageTrips && (
+                                    <>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleOpenEdit(sch)}
+                                        className="p-1 text-blue-600 hover:bg-blue-100 rounded transition-colors"
+                                        title="এডিট"
+                                      >
+                                        <Edit3 className="w-3.5 h-3.5" />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleDeleteTrip(sch)}
+                                        className="p-1 text-rose-600 hover:bg-rose-100 rounded transition-colors"
+                                        title="মুছে ফেলুন"
+                                      >
+                                        <Trash2 className="w-3.5 h-3.5" />
+                                      </button>
+                                    </>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              );
+            };
+
+            return (
+              <>
+                {/* 1. UP Trips List */}
+                {(directionTab === 'ALL' || directionTab === 'UP') && (
+                  <div>
+                    <div className="flex items-center justify-between pb-2.5 mb-4 border-b-2 border-blue-600">
+                      <div className="flex items-center gap-2.5">
+                        <span className="w-3.5 h-3.5 rounded-full bg-blue-600 shadow-xs" />
+                        <h3 className="text-base sm:text-lg font-black text-slate-900 tracking-tight">
+                          ১. আপ ট্রিপ পূর্ণাঙ্গ তালিকা
+                        </h3>
+                        <span className="px-3 py-0.5 rounded-full text-xs font-black bg-blue-100 text-blue-800 border border-blue-300">
+                          {toBengaliDigits(upTrips.length)} টি ট্রিপ
+                        </span>
                       </div>
+                      <span className="text-xs text-slate-500 font-semibold hidden sm:inline">
+                        রুট অনুযায়ী ১ নং, ২ নং ও ছাড়ার সময় অনুযায়ী ক্রমানুসারে (১, ২, ৩...)
+                      </span>
+                    </div>
+
+                    {upRouteGroups.length === 0 ? (
+                      <div className="py-10 text-center text-xs text-slate-400 bg-white rounded-2xl border border-slate-200">
+                        কোনো আপ ট্রিপ শিডিউল পাওয়া যায়নি।
+                      </div>
+                    ) : (
+                      upRouteGroups.map((group) => renderRouteTable(group, 'UP'))
                     )}
+                  </div>
+                )}
 
-                    <div className="flex items-center justify-between">
-                      <span className="text-slate-500">রুট:</span>
-                      <span className="font-semibold text-slate-700 truncate max-w-[190px]">
-                        {sch.routeName}
+                {/* 2. DOWN Trips List */}
+                {(directionTab === 'ALL' || directionTab === 'DOWN') && (
+                  <div className="pt-2">
+                    <div className="flex items-center justify-between pb-2.5 mb-4 border-b-2 border-emerald-600">
+                      <div className="flex items-center gap-2.5">
+                        <span className="w-3.5 h-3.5 rounded-full bg-emerald-600 shadow-xs" />
+                        <h3 className="text-base sm:text-lg font-black text-slate-900 tracking-tight">
+                          ২. ডাউন ট্রিপ পূর্ণাঙ্গ তালিকা
+                        </h3>
+                        <span className="px-3 py-0.5 rounded-full text-xs font-black bg-emerald-100 text-emerald-800 border border-emerald-300">
+                          {toBengaliDigits(downTrips.length)} টি ট্রিপ
+                        </span>
+                      </div>
+                      <span className="text-xs text-slate-500 font-semibold hidden sm:inline">
+                        রুট অনুযায়ী ১ নং, ২ নং ও ছাড়ার সময় অনুযায়ী ক্রমানুসারে (১, ২, ৩...)
                       </span>
                     </div>
 
-                    <div className="flex items-center justify-between">
-                      <span className="text-slate-500">সুপারভাইজার:</span>
-                      <span className="font-medium text-slate-800">
-                        {sch.supervisor} {sch.supervisorPhone ? `(${sch.supervisorPhone})` : ''}
-                      </span>
-                    </div>
+                    {downRouteGroups.length === 0 ? (
+                      <div className="py-10 text-center text-xs text-slate-400 bg-white rounded-2xl border border-slate-200">
+                        কোনো ডাউন ট্রিপ শিডিউল পাওয়া যায়নি।
+                      </div>
+                    ) : (
+                      downRouteGroups.map((group) => renderRouteTable(group, 'DOWN'))
+                    )}
+                  </div>
+                )}
+              </>
+            );
+          })()}
+        </div>
+      ) : (
+        /* CARD VIEW */
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          {filtered.length === 0 ? (
+            <div className="col-span-full py-16 text-center bg-white rounded-3xl border border-dashed border-slate-300 text-xs text-slate-400">
+              নির্বাচিত ফিল্টারে কোনো ট্রিপ শিডিউল পাওয়া যায়নি।
+            </div>
+          ) : (
+            filtered.map((sch) => {
+              const booked = sch.totalBookedSeats || 0;
+              const available = sch.seatCapacity - booked;
+              const percent = Math.round((booked / sch.seatCapacity) * 100);
 
-                    <div className="flex items-center justify-between">
-                      <span className="text-slate-500">টিকিট ভাড়া:</span>
-                      <span className="font-bold text-emerald-700 text-sm">{formatTaka(sch.fare)}</span>
-                    </div>
-
-                    {/* Return Trip / Round Trip Status Banner */}
-                    {sch.direction === 'UP' && !sch.returnTripCreated && (
-                      <div className="flex items-center justify-between p-2.5 bg-amber-50 rounded-2xl border border-amber-200">
-                        <div className="flex items-center gap-1.5 text-[11px] font-bold text-amber-900">
-                          <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
-                          <span>ফিরতি বাকি (ঢাকায় আসা)</span>
+              return (
+                <div
+                  key={sch.id}
+                  className="bg-white rounded-3xl border border-slate-200 shadow-xs p-5 hover:shadow-md transition-all relative overflow-hidden flex flex-col justify-between"
+                >
+                  <div>
+                    {/* Top Header of Card */}
+                    <div className="flex items-center justify-between pb-3 border-b">
+                      <div className="flex items-center gap-2">
+                        <span
+                          className={`w-9 h-9 rounded-2xl font-black text-xs flex items-center justify-center text-white ${
+                            sch.direction === 'UP' ? 'bg-blue-600' : 'bg-emerald-600'
+                          }`}
+                        >
+                          {sch.direction}
+                        </span>
+                        <div>
+                          <div className="flex items-center gap-1.5">
+                            <h4 className="font-bold text-sm text-slate-900">{sch.tripNo}</h4>
+                            {sch.direction === 'UP' && sch.tripSequenceLabel && (
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-amber-100 text-amber-800 border border-amber-300">
+                                {sch.tripSequenceLabel}
+                              </span>
+                            )}
+                          </div>
+                          <span className="text-[10px] text-slate-400">তারিখ: {sch.date}</span>
                         </div>
+                      </div>
+
+                      <div className="text-right">
+                        <span className="inline-flex items-center gap-1 px-3 py-1 bg-emerald-50 text-emerald-800 text-xs font-bold rounded-xl border border-emerald-200">
+                          <Clock className="w-3 h-3 text-emerald-600" />
+                          <span>{sch.departureTime}</span>
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Details Body */}
+                    <div className="py-3 space-y-2 text-xs">
+                      <div className="flex items-center justify-between">
+                        <span className="text-slate-500">গাড়ি নম্বর:</span>
+                        <span className="font-black text-slate-900">{sch.vehicleRegNo}</span>
+                      </div>
+
+                      {sch.vehicleOwnerName && (
+                        <div className="flex items-center justify-between">
+                          <span className="text-slate-500">গাড়ির মালিক:</span>
+                          <span className="font-semibold text-slate-800">{sch.vehicleOwnerName}</span>
+                        </div>
+                      )}
+
+                      <div className="flex items-center justify-between">
+                        <span className="text-slate-500">রুট:</span>
+                        <span className="font-semibold text-slate-700 truncate max-w-[190px]">
+                          {sch.routeName}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center justify-between">
+                        <span className="text-slate-500">সুপারভাইজার:</span>
+                        <span className="font-medium text-slate-800">
+                          {sch.supervisor} {sch.supervisorPhone ? `(${sch.supervisorPhone})` : ''}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center justify-between">
+                        <span className="text-slate-500">টিকিট ভাড়া:</span>
+                        <span className="font-bold text-emerald-700 text-sm">{formatTaka(sch.fare)}</span>
+                      </div>
+
+                      {/* Return Trip / Round Trip Status Banner */}
+                      {sch.direction === 'UP' && !sch.returnTripCreated && (
+                        <div className="flex items-center justify-between p-2.5 bg-amber-50 rounded-2xl border border-amber-200">
+                          <div className="flex items-center gap-1.5 text-[11px] font-bold text-amber-900">
+                            <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+                            <span>ফিরতি বাকি (ঢাকায় আসা)</span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleOpenReturnModal(sch)}
+                            className="px-2.5 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-[11px] font-black shadow-xs cursor-pointer flex items-center gap-1 transition-all"
+                          >
+                            <span>➔ ফিরতি ট্রিপ</span>
+                          </button>
+                        </div>
+                      )}
+
+                      {sch.direction === 'UP' && sch.returnTripCreated && (
+                        <div className="flex items-center gap-1.5 p-2 bg-emerald-50 text-emerald-800 rounded-2xl text-[11px] font-bold border border-emerald-200">
+                          <CheckCircle className="w-3.5 h-3.5 text-emerald-600" />
+                          <span>১টি পূর্ণাঙ্গ রাউন্ড ট্রিপ সম্পন্ন (আপ + ফিরতি ডাউন)</span>
+                        </div>
+                      )}
+
+                      {sch.direction === 'DOWN' && sch.linkedTripId && (
+                        <div className="flex items-center gap-1.5 p-2 bg-blue-50 text-blue-800 rounded-2xl text-[11px] font-bold border border-blue-200">
+                          <ArrowRight className="w-3.5 h-3.5 text-blue-600" />
+                          <span>ফিরতি ডাউন ট্রিপ (পূর্ণাঙ্গ ট্রিপের অংশ)</span>
+                        </div>
+                      )}
+
+                      {sch.isNightHold && (
+                        <div className="flex items-center gap-1.5 p-2 bg-purple-50 text-purple-700 rounded-2xl text-[11px] font-semibold border border-purple-200">
+                          <Moon className="w-3.5 h-3.5" />
+                          <span>রাত্রীকালীন হোল্ড ট্রিপ</span>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Capacity Progress */}
+                    <div className="pt-2 border-t border-slate-100">
+                      <div className="flex items-center justify-between text-[11px] text-slate-500 mb-1">
+                        <span>
+                          বুকড: <strong>{toBengaliDigits(booked)}</strong>/{toBengaliDigits(sch.seatCapacity)} সিট
+                        </span>
+                        <span className="font-semibold">{toBengaliDigits(percent)}% পূর্ণ</span>
+                      </div>
+                      <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
+                        <div
+                          className={`h-full rounded-full transition-all ${
+                            percent > 80 ? 'bg-red-500' : percent > 50 ? 'bg-amber-500' : 'bg-emerald-500'
+                          }`}
+                          style={{ width: `${percent}%` }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Actions */}
+                  <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between gap-2">
+                    {canManageTrips && (
+                      <div className="flex items-center gap-1">
                         <button
                           type="button"
-                          onClick={() => handleOpenReturnModal(sch)}
-                          className="px-2.5 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-[11px] font-black shadow-xs cursor-pointer flex items-center gap-1 transition-all"
+                          onClick={() => handleOpenEdit(sch)}
+                          className="px-2.5 py-1.5 text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-xl transition-colors text-xs font-semibold flex items-center gap-1 cursor-pointer"
+                          title="ট্রিপ তথ্য পরিবর্তন করুন"
                         >
-                          <span>➔ ফিরতি দিন</span>
+                          <Edit3 className="w-3.5 h-3.5" />
+                          <span>এডিট</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteTrip(sch)}
+                          className="p-1.5 text-rose-600 hover:bg-rose-50 rounded-xl transition-colors text-xs font-semibold flex items-center gap-1 cursor-pointer"
+                          title="ট্রিপ মুছে ফেলুন"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
                         </button>
                       </div>
                     )}
 
-                    {sch.direction === 'UP' && sch.returnTripCreated && (
-                      <div className="flex items-center gap-1.5 p-2 bg-emerald-50 text-emerald-800 rounded-2xl text-[11px] font-bold border border-emerald-200">
-                        <CheckCircle className="w-3.5 h-3.5 text-emerald-600" />
-                        <span>১টি পূর্ণাঙ্গ রাউন্ড ট্রিপ সম্পন্ন (আপ + ফিরতি ডাউন)</span>
-                      </div>
-                    )}
-
-                    {sch.direction === 'DOWN' && sch.linkedTripId && (
-                      <div className="flex items-center gap-1.5 p-2 bg-blue-50 text-blue-800 rounded-2xl text-[11px] font-bold border border-blue-200">
-                        <ArrowRight className="w-3.5 h-3.5 text-blue-600" />
-                        <span>ফিরতি ডাউন ট্রিপ (পূর্ণাঙ্গ ট্রিপের অংশ)</span>
-                      </div>
-                    )}
-
-                    {sch.isNightHold && (
-                      <div className="flex items-center gap-1.5 p-2 bg-purple-50 text-purple-700 rounded-2xl text-[11px] font-semibold border border-purple-200">
-                        <Moon className="w-3.5 h-3.5" />
-                        <span>রাত্রীকালীন হোল্ড ট্রিপ</span>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Capacity Progress */}
-                  <div className="pt-2 border-t border-slate-100">
-                    <div className="flex items-center justify-between text-[11px] text-slate-500 mb-1">
-                      <span>
-                        বুকড: <strong>{toBengaliDigits(booked)}</strong>/{toBengaliDigits(sch.seatCapacity)} সিট
-                      </span>
-                      <span className="font-semibold">{toBengaliDigits(percent)}% পূর্ণ</span>
-                    </div>
-                    <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
-                      <div
-                        className={`h-full rounded-full transition-all ${
-                          percent > 80 ? 'bg-red-500' : percent > 50 ? 'bg-amber-500' : 'bg-emerald-500'
-                        }`}
-                        style={{ width: `${percent}%` }}
-                      />
-                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (onSelectTripForBooking) {
+                          onSelectTripForBooking(sch.id);
+                        }
+                      }}
+                      className="flex-1 py-2 px-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-xs hover:shadow-md transition-all flex items-center justify-center gap-1 cursor-pointer"
+                    >
+                      <Armchair className="w-3.5 h-3.5" />
+                      <span>সিট বুকিং</span>
+                    </button>
                   </div>
                 </div>
+              );
+            })
+          )}
+        </div>
+      )}
 
-                {/* Actions */}
-                <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between gap-2">
-                  {canManageTrips && (
-                    <div className="flex items-center gap-1">
-                      <button
-                        type="button"
-                        onClick={() => handleOpenEdit(sch)}
-                        className="px-2.5 py-1.5 text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-xl transition-colors text-xs font-semibold flex items-center gap-1 cursor-pointer"
-                        title="ট্রিপ তথ্য পরিবর্তন করুন"
-                      >
-                        <Edit3 className="w-3.5 h-3.5" />
-                        <span>এডিট</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleDeleteTrip(sch)}
-                        className="p-1.5 text-rose-600 hover:bg-rose-50 rounded-xl transition-colors text-xs font-semibold flex items-center gap-1 cursor-pointer"
-                        title="ট্রিপ মুছে ফেলুন"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  )}
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (onSelectTripForBooking) {
-                        onSelectTripForBooking(sch.id);
-                      }
-                    }}
-                    className="flex-1 py-2 px-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-xs hover:shadow-md transition-all flex items-center justify-center gap-1 cursor-pointer"
-                  >
-                    <Armchair className="w-3.5 h-3.5" />
-                    <span>সিট বুকিং</span>
-                  </button>
-                </div>
-              </div>
-            );
-          })
-        )}
-      </div>
-
-      {/* Return Trip Quick Modal (ফিরতি দিন) */}
+      {/* Return Trip Quick Modal (ফিরতি ট্রিপ তৈরি) */}
       {returnModalTrip && (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl border border-slate-200">
+          <div className="bg-white rounded-3xl max-w-lg w-full max-h-[92vh] overflow-y-auto p-6 shadow-2xl border border-slate-200">
             <div className="flex items-center justify-between pb-3 border-b">
               <div>
-                <h3 className="text-base font-black text-slate-900 flex items-center gap-2">
-                  <span className="w-2.5 h-2.5 rounded-full bg-emerald-500" />
-                  <span>ফিরতি ট্রিপ তৈরি (ডাউন ট্রিপ)</span>
+                <h3 className="text-base font-black text-slate-900">
+                  ফিরতি ট্রিপ তৈরি (ডাউন ট্রিপ)
                 </h3>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  গাড়ি: <strong className="text-slate-900 font-mono">{returnModalTrip.vehicleRegNo}</strong> (আপ ট্রিপ: {returnModalTrip.tripNo})
+                  গাড়ি: <strong className="text-slate-900 font-mono">{returnModalTrip.vehicleRegNo}</strong> · আপ ট্রিপ: {returnModalTrip.tripNo} ({returnModalTrip.routeName})
                 </p>
               </div>
               <button
@@ -964,64 +1364,174 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
             </div>
 
             <form onSubmit={handleCreateReturnTrip} className="space-y-4 mt-4">
-              {/* Return Date */}
+              {/* 1. Return Route Selector (Essential because a bus can return via a different route) */}
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">
-                  ফিরতি ট্রিপের তারিখ
+                  ১. ফিরতি রুট নির্বাচন করুন (রুট নং অনুযায়ী) *
                 </label>
-                <input
-                  type="date"
-                  value={returnDate}
-                  onChange={(e) => setReturnDate(e.target.value)}
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-800 outline-none focus:bg-white focus:ring-1 focus:ring-blue-500"
-                  required
-                />
-              </div>
-
-              {/* Departure Time with Digital Clock */}
-              <DigitalClockPicker
-                value={returnTime}
-                onChange={setReturnTime}
-                label="ফিরতি ছাড়ার সময় (অটো ডিজিটাল ঘড়ি)"
-              />
-
-              {/* Supervisor Dropdown */}
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  সুপারভাইজার
-                </label>
-                {supervisorsList.length > 0 ? (
+                {routesList.filter((r) => r.status === 'active').length > 0 ? (
                   <select
-                    value={returnSupervisor}
-                    onChange={(e) => setReturnSupervisor(e.target.value)}
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-800 outline-none focus:bg-white focus:ring-1 focus:ring-blue-500"
+                    value={returnRouteId}
+                    onChange={(e) => {
+                      const nextId = e.target.value;
+                      setReturnRouteId(nextId);
+                      const chosen = routesList.find((r) => r.id === nextId);
+                      if (chosen?.baseFare) {
+                        setReturnFare(chosen.baseFare);
+                      }
+                    }}
+                    className="w-full px-3 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-xs font-bold text-slate-800 outline-none focus:bg-white focus:ring-2 focus:ring-blue-500"
+                    required
                   >
-                    <option value="">সুপারভাইজার নির্বাচন করুন</option>
-                    {supervisorsList.map((sup) => (
-                      <option key={sup.id} value={sup.name}>
-                        {sup.name}
-                      </option>
-                    ))}
+                    <option value="">রুট নির্বাচন করুন</option>
+                    {routesList.some((r) => r.status === 'active' && r.direction === 'DOWN') && (
+                      <optgroup label="ডাউন রুটসমূহ (ঢাকা ➜ মাদারীপুর)">
+                        {routesList
+                          .filter((r) => r.status === 'active' && r.direction === 'DOWN')
+                          .map((r) => (
+                            <option key={r.id} value={r.id}>
+                              {r.name} {r.baseFare ? `(৳${toBengaliDigits(r.baseFare)})` : ''}
+                            </option>
+                          ))}
+                      </optgroup>
+                    )}
+                    {routesList.some((r) => r.status === 'active' && r.direction !== 'DOWN') && (
+                      <optgroup label="অন্যান্য সক্রিয় রুট (রুট পরিবর্তন হলে)">
+                        {routesList
+                          .filter((r) => r.status === 'active' && r.direction !== 'DOWN')
+                          .map((r) => (
+                            <option key={r.id} value={r.id}>
+                              {r.name} ({r.direction === 'UP' ? 'আপ' : r.direction})
+                            </option>
+                          ))}
+                      </optgroup>
+                    )}
                   </select>
                 ) : (
-                  <input
-                    type="text"
-                    value={returnSupervisor}
-                    onChange={(e) => setReturnSupervisor(e.target.value)}
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-800 outline-none focus:bg-white"
-                    placeholder="সুপারভাইজারের নাম"
-                    required
-                  />
+                  <div className="p-2.5 bg-amber-50 border border-amber-200 rounded-xl text-[11px] text-amber-800">
+                    কোনো ডাউন রুট পাওয়া যায়নি; রুট ম্যানেজমেন্ট থেকে রুট যোগ করুন।
+                  </div>
                 )}
               </div>
 
-              <div className="bg-blue-50 p-3 rounded-2xl border border-blue-200 text-xs text-blue-900 space-y-1">
-                <div className="font-bold flex items-center gap-1.5">
-                  <span>ℹ️</span>
-                  <span>১টি পূর্ণাঙ্গ ট্রিপ হিসাব:</span>
+              {/* 2. Return Date with Calendar & Quick Day Buttons */}
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                    <Calendar className="w-3.5 h-3.5 text-blue-600" />
+                    <span>২. ফিরতি ট্রিপের তারিখ *</span>
+                  </label>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setReturnDate(getTodayDhakaDate())}
+                      className={`px-2 py-0.5 rounded-lg text-[10px] font-bold border transition-colors cursor-pointer ${
+                        returnDate === getTodayDhakaDate()
+                          ? 'bg-blue-600 text-white border-blue-600'
+                          : 'bg-slate-100 text-slate-700 border-slate-200 hover:bg-slate-200'
+                      }`}
+                    >
+                      আজকে
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setReturnDate(addDaysToDateStr(getTodayDhakaDate(), 1))}
+                      className={`px-2 py-0.5 rounded-lg text-[10px] font-bold border transition-colors cursor-pointer ${
+                        returnDate === addDaysToDateStr(getTodayDhakaDate(), 1)
+                          ? 'bg-blue-600 text-white border-blue-600'
+                          : 'bg-slate-100 text-slate-700 border-slate-200 hover:bg-slate-200'
+                      }`}
+                    >
+                      আগামীকাল
+                    </button>
+                  </div>
                 </div>
+                <div className="flex items-center gap-2 bg-slate-50 px-3 py-2 rounded-xl border border-slate-300">
+                  <Calendar className="w-4 h-4 text-blue-600 shrink-0" />
+                  <input
+                    type="date"
+                    value={returnDate}
+                    onChange={(e) => setReturnDate(e.target.value)}
+                    className="w-full bg-transparent text-xs font-bold text-slate-800 outline-none cursor-pointer"
+                    required
+                  />
+                  <span className="text-[11px] font-semibold text-slate-500 whitespace-nowrap shrink-0">
+                    {formatBengaliDate(returnDate)}
+                  </span>
+                </div>
+              </div>
+
+              {/* 3. Departure Time with Digital Clock */}
+              <DigitalClockPicker
+                value={returnTime}
+                onChange={setReturnTime}
+                label="৩. ফিরতি ছাড়ার সময় ও তারিখ নির্ধারণের ঘড়ি"
+              />
+
+              {/* 4. Supervisor & Driver */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    সুপারভাইজার
+                  </label>
+                  {supervisorsList.length > 0 ? (
+                    <select
+                      value={returnSupervisor}
+                      onChange={(e) => setReturnSupervisor(e.target.value)}
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-800 outline-none focus:bg-white focus:ring-1 focus:ring-blue-500"
+                    >
+                      <option value="">সুপারভাইজার নির্বাচন করুন</option>
+                      {supervisorsList.map((sup) => (
+                        <option key={sup.id} value={sup.name}>
+                          {sup.name}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input
+                      type="text"
+                      value={returnSupervisor}
+                      onChange={(e) => setReturnSupervisor(e.target.value)}
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-800 outline-none focus:bg-white"
+                      placeholder="সুপারভাইজারের নাম"
+                      required
+                    />
+                  )}
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    ড্রাইভার
+                  </label>
+                  {driversList.length > 0 ? (
+                    <select
+                      value={returnDriver}
+                      onChange={(e) => setReturnDriver(e.target.value)}
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-800 outline-none focus:bg-white focus:ring-1 focus:ring-blue-500"
+                    >
+                      <option value="">ড্রাইভার নির্বাচন করুন</option>
+                      {driversList.map((drv) => (
+                        <option key={drv.id} value={drv.name}>
+                          {drv.name}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input
+                      type="text"
+                      value={returnDriver}
+                      onChange={(e) => setReturnDriver(e.target.value)}
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-800 outline-none focus:bg-white"
+                      placeholder="ড্রাইভারের নাম"
+                    />
+                  )}
+                </div>
+              </div>
+
+              <div className="bg-blue-50 p-3 rounded-2xl border border-blue-200 text-xs text-blue-900 space-y-1">
+                <div className="font-bold">১টি পূর্ণাঙ্গ ট্রিপ হিসাব</div>
                 <p className="text-[11px] text-blue-800">
-                  এই ডাউন ট্রিপটি তৈরি হলে পূর্ববর্তী আপ ট্রিপের সাথে সংযুক্ত হয়ে যাবে এবং ওই গাড়ির ১টি পূর্ণাঙ্গ ট্রিপ হিসেবে কাউন্ট হবে। তৈরি হওয়ার পর সরাসরি সিট বুকিং শুরু করা যাবে।
+                  এই ডাউন ট্রিপটি তৈরি হলে পূর্ববর্তী আপ ট্রিপের সাথে সংযুক্ত হয়ে যাবে এবং ওই গাড়ির ১টি পূর্ণাঙ্গ ট্রিপ হিসেবে কাউন্ট হবে।
                 </p>
               </div>
 
@@ -1045,7 +1555,7 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
                     </>
                   ) : (
                     <>
-                      <span>ডাউন ট্রিপ তৈরি ও বুকিং শুরু</span>
+                      <span>ফিরতি ট্রিপ তৈরি ও বুকিং শুরু</span>
                       <ArrowRight className="w-3.5 h-3.5" />
                     </>
                   )}
@@ -1059,7 +1569,7 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
       {/* Edit Schedule Modal (Using DigitalClockPicker!) */}
       {editingSchedule && (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl border border-slate-200">
+          <div className="bg-white rounded-3xl max-w-lg w-full max-h-[92vh] overflow-y-auto p-6 shadow-2xl border border-slate-200">
             <h3 className="text-base font-bold text-slate-900 mb-1">
               ট্রিপ তথ্য পরিবর্তন ({editingSchedule.tripNo})
             </h3>
@@ -1074,6 +1584,26 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
                 onChange={setEditTime}
                 label="ছাড়ার সময় নির্ধারণ (অটো ডিজিটাল ঘড়ি)"
               />
+
+              {routesList.filter((r) => r.status === 'active').length > 0 && (
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">রুট পরিবর্তন</label>
+                  <select
+                    value={editRouteId}
+                    onChange={(e) => setEditRouteId(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-50 border rounded-xl text-xs font-bold text-slate-800 outline-none focus:bg-white"
+                  >
+                    <option value="">বর্তমান রুট ({editingSchedule.routeName})</option>
+                    {routesList
+                      .filter((r) => r.status === 'active')
+                      .map((r) => (
+                        <option key={r.id} value={r.id}>
+                          {r.name} ({r.direction === 'UP' ? 'আপ' : 'ডাউন'})
+                        </option>
+                      ))}
+                  </select>
+                </div>
+              )}
 
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">সুপারভাইজার</label>
@@ -1254,56 +1784,116 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
                 </table>
               </div>
 
-              {/* Table 2: Detailed Trip List with Sequence badges */}
-              <div>
-                <h4 className="text-xs font-bold text-slate-800 mb-2 uppercase tracking-wide">
-                  ২. ট্রিপসমূহের পূর্ণাঙ্গ বিবরণ (শিডিউল ও সিকোয়েন্স):
-                </h4>
-                <table className="w-full text-xs border-collapse border border-slate-300">
-                  <thead>
-                    <tr className="bg-slate-100 font-bold border-b border-slate-300">
-                      <th className="border border-slate-300 p-2 text-left">ট্রিপ নং</th>
-                      <th className="border border-slate-300 p-2 text-left">তারিখ ও সময়</th>
-                      <th className="border border-slate-300 p-2 text-left">গাড়ি ও ট্রিপ ক্রম</th>
-                      <th className="border border-slate-300 p-2 text-left">রুট</th>
-                      <th className="border border-slate-300 p-2 text-left">সুপারভাইজার</th>
-                      <th className="border border-slate-300 p-2 text-center">সিট বুকড</th>
-                      <th className="border border-slate-300 p-2 text-right">আদায় (৳)</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filtered.map((s) => (
-                      <tr key={s.id} className="border-b border-slate-200">
-                        <td className="border border-slate-300 p-2 font-bold">{s.tripNo}</td>
-                        <td className="border border-slate-300 p-2">
-                          <div>{s.date}</div>
-                          <div className="text-[10px] text-slate-500 font-semibold">{s.departureTime}</div>
-                        </td>
-                        <td className="border border-slate-300 p-2 font-semibold">
-                          <div>{s.vehicleRegNo}</div>
-                          <span className="text-[10px] text-amber-800 font-bold">
-                            {s.tripSequenceLabel || '১ম ট্রিপ'}
-                          </span>
-                        </td>
-                        <td className="border border-slate-300 p-2">{s.routeName}</td>
-                        <td className="border border-slate-300 p-2">{s.supervisor}</td>
-                        <td className="border border-slate-300 p-2 text-center font-bold">
-                          {toBengaliDigits(s.totalBookedSeats || 0)}/{toBengaliDigits(s.seatCapacity)}
-                        </td>
-                        <td className="border border-slate-300 p-2 text-right font-bold">
-                          {formatTaka(s.totalCollection || (s.totalBookedSeats || 0) * s.fare)}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+              {/* Table 2.1: UP Trips List Route-Grouped */}
+              {upRouteGroups.length > 0 && (
+                <div>
+                  <h4 className="text-xs font-bold text-blue-900 mb-2 uppercase tracking-wide">
+                    ২.১ আপ ট্রিপ রুটভিত্তিক তালিকা (সময় অনুযায়ী ক্রমানুসারে):
+                  </h4>
+                  {upRouteGroups.map((rg) => (
+                    <div key={`print-up-${rg.routeNumber}`} className="mb-4">
+                      <div className="text-[11px] font-bold text-slate-800 bg-slate-100 p-1.5 border border-slate-300 border-b-0">
+                        {toBengaliDigits(rg.routeNumber)} নং রুট : {rg.routeName} (মোট {toBengaliDigits(rg.trips.length)} টি ট্রিপ)
+                      </div>
+                      <table className="w-full text-xs border-collapse border border-slate-300 mb-2">
+                        <thead>
+                          <tr className="bg-slate-50 font-bold border-b border-slate-300">
+                            <th className="border border-slate-300 p-1.5 text-center w-12">ক্রমিক</th>
+                            <th className="border border-slate-300 p-1.5 text-left">ট্রিপ নং</th>
+                            <th className="border border-slate-300 p-1.5 text-left">ছাড়ার সময়</th>
+                            <th className="border border-slate-300 p-1.5 text-left">গাড়ি নম্বর</th>
+                            <th className="border border-slate-300 p-1.5 text-left">মালিক</th>
+                            <th className="border border-slate-300 p-1.5 text-left">সুপারভাইজার</th>
+                            <th className="border border-slate-300 p-1.5 text-left">ড্রাইভার</th>
+                            <th className="border border-slate-300 p-1.5 text-center">বুকড সিট</th>
+                            <th className="border border-slate-300 p-1.5 text-right">আদায় (৳)</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {rg.trips.map((s) => (
+                            <tr key={s.id} className="border-b border-slate-200">
+                              <td className="border border-slate-300 p-1.5 text-center font-bold">
+                                {toBengaliDigits(s.serialInRoute)}
+                              </td>
+                              <td className="border border-slate-300 p-1.5 font-bold">{s.tripNo}</td>
+                              <td className="border border-slate-300 p-1.5 font-bold">{s.departureTime}</td>
+                              <td className="border border-slate-300 p-1.5">{s.vehicleRegNo}</td>
+                              <td className="border border-slate-300 p-1.5">{s.vehicleOwnerName || 'সাধারণ'}</td>
+                              <td className="border border-slate-300 p-1.5">{s.supervisor}</td>
+                              <td className="border border-slate-300 p-1.5">{s.driver}</td>
+                              <td className="border border-slate-300 p-1.5 text-center font-bold">
+                                {toBengaliDigits(s.totalBookedSeats || 0)}/{toBengaliDigits(s.seatCapacity)}
+                              </td>
+                              <td className="border border-slate-300 p-1.5 text-right font-bold">
+                                {formatTaka(s.totalCollection || (s.totalBookedSeats || 0) * s.fare)}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ))}
+                </div>
+              )}
 
-              {/* Signatures */}
-              <div className="pt-12 grid grid-cols-3 gap-8 text-center text-xs font-semibold text-slate-700">
-                <div className="border-t border-slate-400 pt-1">হিসাব সহকারী স্বাক্ষর</div>
-                <div className="border-t border-slate-400 pt-1">ট্রাফিক ইনচার্জ স্বাক্ষর</div>
-                <div className="border-t border-slate-400 pt-1">ম্যানেজার অনুমোদন</div>
+              {/* Table 2.2: DOWN Trips List Route-Grouped */}
+              {downRouteGroups.length > 0 && (
+                <div>
+                  <h4 className="text-xs font-bold text-emerald-900 mb-2 uppercase tracking-wide">
+                    ২.২ ডাউন ট্রিপ রুটভিত্তিক তালিকা (সময় অনুযায়ী ক্রমানুসারে):
+                  </h4>
+                  {downRouteGroups.map((rg) => (
+                    <div key={`print-dn-${rg.routeNumber}`} className="mb-4">
+                      <div className="text-[11px] font-bold text-slate-800 bg-slate-100 p-1.5 border border-slate-300 border-b-0">
+                        {toBengaliDigits(rg.routeNumber)} নং রুট : {rg.routeName} (মোট {toBengaliDigits(rg.trips.length)} টি ট্রিপ)
+                      </div>
+                      <table className="w-full text-xs border-collapse border border-slate-300 mb-2">
+                        <thead>
+                          <tr className="bg-slate-50 font-bold border-b border-slate-300">
+                            <th className="border border-slate-300 p-1.5 text-center w-12">ক্রমিক</th>
+                            <th className="border border-slate-300 p-1.5 text-left">ট্রিপ নং</th>
+                            <th className="border border-slate-300 p-1.5 text-left">ছাড়ার সময়</th>
+                            <th className="border border-slate-300 p-1.5 text-left">গাড়ি নম্বর</th>
+                            <th className="border border-slate-300 p-1.5 text-left">মালিক</th>
+                            <th className="border border-slate-300 p-1.5 text-left">সুপারভাইজার</th>
+                            <th className="border border-slate-300 p-1.5 text-left">ড্রাইভার</th>
+                            <th className="border border-slate-300 p-1.5 text-center">বুকড সিট</th>
+                            <th className="border border-slate-300 p-1.5 text-right">আদায় (৳)</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {rg.trips.map((s) => (
+                            <tr key={s.id} className="border-b border-slate-200">
+                              <td className="border border-slate-300 p-1.5 text-center font-bold">
+                                {toBengaliDigits(s.serialInRoute)}
+                              </td>
+                              <td className="border border-slate-300 p-1.5 font-bold">{s.tripNo}</td>
+                              <td className="border border-slate-300 p-1.5 font-bold">{s.departureTime}</td>
+                              <td className="border border-slate-300 p-1.5">{s.vehicleRegNo}</td>
+                              <td className="border border-slate-300 p-1.5">{s.vehicleOwnerName || 'সাধারণ'}</td>
+                              <td className="border border-slate-300 p-1.5">{s.supervisor}</td>
+                              <td className="border border-slate-300 p-1.5">{s.driver}</td>
+                              <td className="border border-slate-300 p-1.5 text-center font-bold">
+                                {toBengaliDigits(s.totalBookedSeats || 0)}/{toBengaliDigits(s.seatCapacity)}
+                              </td>
+                              <td className="border border-slate-300 p-1.5 text-right font-bold">
+                                {formatTaka(s.totalCollection || (s.totalBookedSeats || 0) * s.fare)}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Single Certification / Approval */}
+              <div className="pt-12 flex justify-between items-center text-xs font-semibold text-slate-800">
+                <div>তারিখ: {formatBengaliDate(getTodayDhakaDate())}</div>
+                <div className="border-t border-slate-600 pt-1 w-64 text-center">
+                  প্রত্যায়নকারী : ____________________
+                </div>
               </div>
             </div>
           </div>

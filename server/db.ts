@@ -14,6 +14,8 @@ import type {
   Company,
   Supervisor,
   Driver,
+  FuelEntry,
+  FuelSettings,
 } from '../src/types/index.ts';
 
 const DATA_DIR = path.resolve(process.cwd(), 'data');
@@ -32,6 +34,8 @@ export interface DatabaseSchema {
   reconciliations: Reconciliation[];
   auditLogs: AuditLog[];
   settings: SystemSettings;
+  fuelEntries?: FuelEntry[];
+  fuelSettings?: Record<string, FuelSettings>;
 }
 
 export function hashPin(pin: string, salt: string): string {
@@ -88,9 +92,9 @@ function getInitialDatabase(): DatabaseSchema {
     {
       id: 'usr-01',
       loginId: 'admin',
-      name: 'Zayem Bhuiya / জায়িম ভুইয়া',
-      role: 'master_admin',
-      phone: '01700-111111',
+      name: 'মাস্টার এডমিন (Data&Code)',
+      role: 'super_admin',
+      phone: '01700-000000',
       status: 'active',
       pinHash: hashPin('1234', adminSalt),
       pinSalt: adminSalt,
@@ -124,6 +128,15 @@ function getInitialDatabase(): DatabaseSchema {
   };
 }
 
+export function getCompanyPrefix(companyName: string, companyId: string): string {
+  const cname = (companyName || '').trim().toUpperCase();
+  const en = cname.replace(/[^A-Z]/g, '');
+  if (en.length >= 2) return en.slice(0, 3);
+  const cid = (companyId || '').replace(/[^a-zA-Z0-9]/g, '').slice(-3).toUpperCase();
+  return cid || 'BUS';
+}
+
+
 class Database {
   private data: DatabaseSchema;
   private saveTimer: NodeJS.Timeout | null = null;
@@ -156,6 +169,18 @@ class Database {
           if (!parsed.bookings) parsed.bookings = [];
           if (!parsed.reconciliations) parsed.reconciliations = [];
           if (!parsed.auditLogs) parsed.auditLogs = [];
+          if (!parsed.fuelEntries) parsed.fuelEntries = [];
+          if (!parsed.fuelSettings) parsed.fuelSettings = {};
+
+          // Migrate roles: ensure platform master admin is super_admin and company admins are company_admin
+          parsed.users.forEach((u: any) => {
+            if (u.loginId === 'admin') {
+              u.role = 'super_admin';
+            } else if (u.companyId && (u.role === 'master_admin' || !u.role)) {
+              u.role = 'company_admin';
+            }
+          });
+
           parsed.settings = {
             companyName: parsed.settings?.companyName || 'Counter Management System',
             subTitle: parsed.settings?.subTitle || 'কাউন্টার বুকিং ও ট্রিপ ইনফরমেশন',
@@ -165,6 +190,7 @@ class Database {
             currency: parsed.settings?.currency || '৳',
             timezone: parsed.settings?.timezone || 'Asia/Dhaka',
           };
+
           return parsed;
         }
       }
@@ -179,8 +205,17 @@ class Database {
   private persistSync(dataToSave: DatabaseSchema) {
     try {
       this.ensureDataDir();
+      const content = JSON.stringify(dataToSave, null, 2);
+      // Keep a safety backup
+      if (fs.existsSync(DB_FILE)) {
+        try {
+          fs.copyFileSync(DB_FILE, `${DB_FILE}.bak`);
+        } catch {
+          // ignore backup write issue
+        }
+      }
       const tmpFile = `${DB_FILE}.tmp`;
-      fs.writeFileSync(tmpFile, JSON.stringify(dataToSave, null, 2), 'utf-8');
+      fs.writeFileSync(tmpFile, content, 'utf-8');
       fs.renameSync(tmpFile, DB_FILE);
     } catch (err) {
       console.error('Error saving database to file:', err);
@@ -224,13 +259,13 @@ class Database {
     };
     this.getCompanies().push(newCompany);
 
-    // Also register company admin user
+    // Register company admin user
     const userSalt = generateSalt();
     this.data.users.push({
       id: `usr-${Date.now()}`,
       loginId: data.adminLoginId.trim(),
       name: `${data.name} এডমিন`,
-      role: 'master_admin',
+      role: 'company_admin',
       companyId: newCompany.id,
       phone: data.phone.trim(),
       status: 'active',
@@ -252,10 +287,26 @@ class Database {
     if (data.phone !== undefined) comp.phone = data.phone.trim();
     if (data.subscriptionExpiry !== undefined) comp.subscriptionExpiry = data.subscriptionExpiry;
     if (data.status !== undefined) comp.status = data.status;
+    if (data.adminLoginId) {
+      comp.adminLoginId = data.adminLoginId.trim();
+    }
     if (data.pin && data.pin.trim()) {
       const salt = generateSalt();
       comp.adminPinSalt = salt;
       comp.adminPinHash = hashPin(data.pin.trim(), salt);
+
+      // Also update company_admin user
+      const adminUser = this.data.users.find((u) => u.companyId === id && u.role === 'company_admin');
+      if (adminUser) {
+        if (data.adminLoginId) adminUser.loginId = data.adminLoginId.trim();
+        adminUser.pinSalt = salt;
+        adminUser.pinHash = hashPin(data.pin.trim(), salt);
+      }
+    } else if (data.adminLoginId) {
+      const adminUser = this.data.users.find((u) => u.companyId === id && u.role === 'company_admin');
+      if (adminUser) {
+        adminUser.loginId = data.adminLoginId.trim();
+      }
     }
     this.save();
     return comp;
@@ -265,6 +316,23 @@ class Database {
     const index = this.getCompanies().findIndex((c) => c.id === id);
     if (index === -1) throw new Error('কোম্পানি খুঁজে পাওয়া যায়নি!');
     this.getCompanies().splice(index, 1);
+
+    // Cascade clean related records of this company
+    this.data.users = this.data.users.filter((u) => u.companyId !== id);
+    this.data.counters = this.data.counters.filter((c) => c.companyId !== id);
+    this.data.vehicles = this.data.vehicles.filter((v) => v.companyId !== id);
+    this.data.routes = this.data.routes.filter((r) => r.companyId !== id);
+    this.data.supervisors = this.data.supervisors.filter((s) => s.companyId !== id);
+    this.data.drivers = this.data.drivers.filter((d) => d.companyId !== id);
+    this.data.schedules = this.data.schedules.filter((s) => s.companyId !== id);
+    this.data.bookings = this.data.bookings.filter((b) => b.companyId !== id);
+    if (this.data.fuelEntries) {
+      this.data.fuelEntries = this.data.fuelEntries.filter((f) => f.companyId !== id);
+    }
+    if (this.data.fuelSettings && this.data.fuelSettings[id]) {
+      delete this.data.fuelSettings[id];
+    }
+
     this.save();
   }
 
@@ -305,14 +373,16 @@ class Database {
   }
 
   // Supervisors Directory (NO LOGIN)
-  public getSupervisors() {
+  public getSupervisors(companyId?: string) {
     if (!this.data.supervisors) this.data.supervisors = [];
-    return this.data.supervisors;
+    if (!companyId) return this.data.supervisors;
+    return this.data.supervisors.filter((s) => s.companyId === companyId);
   }
 
-  public createSupervisor(data: { name: string; phone?: string }) {
+  public createSupervisor(data: { name: string; phone?: string; companyId?: string }) {
     const newSupervisor: Supervisor = {
       id: `sup-${Date.now()}`,
+      companyId: data.companyId,
       name: data.name.trim(),
       phone: data.phone?.trim() || '',
       status: 'active',
@@ -341,15 +411,18 @@ class Database {
   }
 
   // Drivers Directory (NO LOGIN, NAME ONLY)
-  public getDrivers() {
+  public getDrivers(companyId?: string) {
     if (!this.data.drivers) this.data.drivers = [];
-    return this.data.drivers;
+    if (!companyId) return this.data.drivers;
+    return this.data.drivers.filter((d) => d.companyId === companyId);
   }
 
-  public createDriver(data: { name: string }) {
+  public createDriver(data: { name: string; phone?: string; companyId?: string }) {
     const newDriver: Driver = {
       id: `drv-${Date.now()}`,
+      companyId: data.companyId,
       name: data.name.trim(),
+      phone: data.phone?.trim() || '',
       status: 'active',
       createdAt: new Date().toISOString(),
     };
@@ -362,6 +435,7 @@ class Database {
     const drv = this.getDrivers().find((d) => d.id === id);
     if (!drv) throw new Error('ড্রাইভার খুঁজে পাওয়া যায়নি!');
     if (data.name) drv.name = data.name.trim();
+    if (data.phone !== undefined) drv.phone = data.phone.trim();
     if (data.status) drv.status = data.status;
     this.save();
     return drv;
@@ -406,7 +480,7 @@ class Database {
     const index = this.data.users.findIndex((u) => u.id === id);
     if (index === -1) throw new Error('ব্যবহারকারী খুঁজে পাওয়া যায়নি!');
     const user = this.data.users[index];
-    if (user.role === 'master_admin' && this.data.users.filter((u) => u.role === 'master_admin').length <= 1) {
+    if (user.role === 'super_admin' && this.data.users.filter((u) => u.role === 'super_admin').length <= 1) {
       throw new Error('সিস্টেমের একমাত্র মাস্টার এডমিন মুছে ফেলা সম্ভব নয়!');
     }
     this.data.users.splice(index, 1);
@@ -414,33 +488,40 @@ class Database {
     return user;
   }
 
-  // Getters
-  public getUsers() {
-    return this.data.users;
+  // Getters with Company Scoping
+  public getUsers(companyId?: string) {
+    if (!companyId) return this.data.users;
+    return this.data.users.filter((u) => u.companyId === companyId);
   }
 
-  public getCounters() {
-    return this.data.counters;
+  public getCounters(companyId?: string) {
+    if (!companyId) return this.data.counters;
+    return this.data.counters.filter((c) => c.companyId === companyId);
   }
 
-  public getVehicles() {
-    return this.data.vehicles;
+  public getVehicles(companyId?: string) {
+    if (!companyId) return this.data.vehicles;
+    return this.data.vehicles.filter((v) => v.companyId === companyId);
   }
 
-  public getRoutes() {
-    return this.data.routes;
+  public getRoutes(companyId?: string) {
+    if (!companyId) return this.data.routes;
+    return this.data.routes.filter((r) => r.companyId === companyId);
   }
 
-  public getSchedules() {
-    return this.data.schedules;
+  public getSchedules(companyId?: string) {
+    if (!companyId) return this.data.schedules;
+    return this.data.schedules.filter((s) => s.companyId === companyId);
   }
 
-  public getBookings() {
-    return this.data.bookings;
+  public getBookings(companyId?: string) {
+    if (!companyId) return this.data.bookings;
+    return this.data.bookings.filter((b) => b.companyId === companyId);
   }
 
-  public getReconciliations() {
-    return this.data.reconciliations;
+  public getReconciliations(companyId?: string) {
+    if (!companyId) return this.data.reconciliations;
+    return this.data.reconciliations.filter((r) => r.companyId === companyId);
   }
 
   public getAuditLogs() {
@@ -552,6 +633,7 @@ class Database {
 
     const newBooking: Booking = {
       id: `bkg-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      companyId: schedule.companyId || counter.companyId,
       ticketNo,
       scheduleId: schedule.id,
       tripNo: schedule.tripNo,
@@ -648,6 +730,188 @@ class Database {
     booking.lastPrintedAt = new Date().toISOString();
     this.save();
     return booking;
+  }
+
+  // FUEL MANAGEMENT
+  public getFuelEntries(companyId?: string): FuelEntry[] {
+    if (!this.data.fuelEntries) this.data.fuelEntries = [];
+    if (!companyId) return this.data.fuelEntries;
+    return this.data.fuelEntries.filter((f) => !f.companyId || f.companyId === companyId);
+  }
+
+  public createFuelEntry(entry: Omit<FuelEntry, 'id' | 'createdAt'>): FuelEntry {
+    if (!this.data.fuelEntries) this.data.fuelEntries = [];
+    const newEntry: FuelEntry = {
+      ...entry,
+      id: `fuel-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+      createdAt: new Date().toISOString(),
+    };
+    this.data.fuelEntries.unshift(newEntry);
+    this.save();
+    return newEntry;
+  }
+
+  public updateFuelEntry(id: string, updates: Partial<FuelEntry>): FuelEntry | null {
+    if (!this.data.fuelEntries) this.data.fuelEntries = [];
+    const idx = this.data.fuelEntries.findIndex((f) => f.id === id);
+    if (idx === -1) return null;
+    this.data.fuelEntries[idx] = { ...this.data.fuelEntries[idx], ...updates };
+    this.save();
+    return this.data.fuelEntries[idx];
+  }
+
+  public deleteFuelEntry(id: string): boolean {
+    if (!this.data.fuelEntries) this.data.fuelEntries = [];
+    const initialLen = this.data.fuelEntries.length;
+    this.data.fuelEntries = this.data.fuelEntries.filter((f) => f.id !== id);
+    if (this.data.fuelEntries.length !== initialLen) {
+      this.save();
+      return true;
+    }
+    return false;
+  }
+
+  public getFuelSettings(companyId?: string): FuelSettings {
+    if (!this.data.fuelSettings) this.data.fuelSettings = {};
+    const key = companyId || 'default';
+    return (
+      this.data.fuelSettings[key] || {
+        commonMileage: 4,
+        fuelPricePerLiter: 135.4,
+      }
+    );
+  }
+
+  public saveFuelSettings(settings: FuelSettings, companyId?: string): FuelSettings {
+    if (!this.data.fuelSettings) this.data.fuelSettings = {};
+    const key = companyId || 'default';
+    this.data.fuelSettings[key] = {
+      commonMileage: Number(settings.commonMileage) || 4,
+      fuelPricePerLiter: Number(settings.fuelPricePerLiter) || 135.4,
+    };
+    this.save();
+    return this.data.fuelSettings[key];
+  }
+
+  // VAULT SNAPSHOT & REHYDRATION (Zero-Loss Persistence Across Cold Restarts)
+  public isEmptyFreshState(): boolean {
+    return (
+      (this.data.companies?.length || 0) === 0 &&
+      (this.data.users?.length || 0) <= 1 &&
+      (this.data.vehicles?.length || 0) === 0 &&
+      (this.data.counters?.length || 0) === 0 &&
+      (this.data.routes?.length || 0) === 0 &&
+      (this.data.schedules?.length || 0) === 0 &&
+      (this.data.bookings?.length || 0) === 0
+    );
+  }
+
+  public getVaultSnapshot(): Partial<DatabaseSchema> {
+    return {
+      companies: this.data.companies || [],
+      users: this.data.users || [],
+      supervisors: this.data.supervisors || [],
+      drivers: this.data.drivers || [],
+      counters: this.data.counters || [],
+      vehicles: this.data.vehicles || [],
+      routes: this.data.routes || [],
+      schedules: this.data.schedules || [],
+      bookings: this.data.bookings || [],
+      reconciliations: this.data.reconciliations || [],
+      fuelEntries: this.data.fuelEntries || [],
+      fuelSettings: this.data.fuelSettings || {},
+      settings: this.data.settings,
+    };
+  }
+
+  public rehydrateFromVault(vault: Partial<DatabaseSchema>): { restoredCount: number } {
+    if (!vault || typeof vault !== 'object') {
+      return { restoredCount: 0 };
+    }
+
+    let restoredCount = 0;
+
+    const mergeCollection = <T extends { id: string }>(target: T[], source?: T[]) => {
+      if (!Array.isArray(source)) return;
+      const existingIds = new Set(target.map((item) => item.id));
+      for (const item of source) {
+        if (item && item.id && !existingIds.has(item.id)) {
+          target.push(item);
+          existingIds.add(item.id);
+          restoredCount++;
+        }
+      }
+    };
+
+    if (!this.data.companies) this.data.companies = [];
+    mergeCollection(this.data.companies, vault.companies);
+
+    if (Array.isArray(vault.users)) {
+      const existingIds = new Set(this.data.users.map((u) => u.id));
+      const existingLoginIds = new Set(this.data.users.map((u) => u.loginId.toLowerCase()));
+      for (const u of vault.users) {
+        if (
+          u &&
+          u.id &&
+          u.loginId &&
+          u.loginId.toLowerCase() !== 'admin' &&
+          !existingIds.has(u.id) &&
+          !existingLoginIds.has(u.loginId.toLowerCase())
+        ) {
+          this.data.users.push(u);
+          existingIds.add(u.id);
+          existingLoginIds.add(u.loginId.toLowerCase());
+          restoredCount++;
+        }
+      }
+    }
+
+    if (!this.data.supervisors) this.data.supervisors = [];
+    mergeCollection(this.data.supervisors, vault.supervisors);
+
+    if (!this.data.drivers) this.data.drivers = [];
+    mergeCollection(this.data.drivers, vault.drivers);
+
+    if (!this.data.counters) this.data.counters = [];
+    mergeCollection(this.data.counters, vault.counters);
+
+    if (!this.data.vehicles) this.data.vehicles = [];
+    mergeCollection(this.data.vehicles, vault.vehicles);
+
+    if (!this.data.routes) this.data.routes = [];
+    mergeCollection(this.data.routes, vault.routes);
+
+    if (!this.data.schedules) this.data.schedules = [];
+    mergeCollection(this.data.schedules, vault.schedules);
+
+    if (!this.data.bookings) this.data.bookings = [];
+    mergeCollection(this.data.bookings, vault.bookings);
+
+    if (!this.data.reconciliations) this.data.reconciliations = [];
+    mergeCollection(this.data.reconciliations, vault.reconciliations);
+
+    if (!this.data.fuelEntries) this.data.fuelEntries = [];
+    mergeCollection(this.data.fuelEntries, vault.fuelEntries);
+
+    if (vault.fuelSettings && typeof vault.fuelSettings === 'object') {
+      if (!this.data.fuelSettings) this.data.fuelSettings = {};
+      for (const [cmpId, fsVal] of Object.entries(vault.fuelSettings)) {
+        if (!this.data.fuelSettings[cmpId] && fsVal) {
+          this.data.fuelSettings[cmpId] = fsVal;
+          restoredCount++;
+        }
+      }
+    }
+
+    if (vault.settings && typeof vault.settings === 'object') {
+      this.data.settings = { ...this.data.settings, ...vault.settings };
+    }
+
+    if (restoredCount > 0) {
+      this.save();
+    }
+
+    return { restoredCount };
   }
 }
 

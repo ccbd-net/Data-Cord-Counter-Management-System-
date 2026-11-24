@@ -1,16 +1,16 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext.tsx';
 import { api } from '../services/api.ts';
 import type { Schedule, Booking, Counter } from '../types/index.ts';
 import { SeatMap } from '../components/SeatMap.tsx';
 import { TripAlertBanner } from '../components/TripAlertBanner.tsx';
 import { ThermalTicketModal } from '../components/ThermalTicketModal.tsx';
+import { useDataSync } from '../hooks/useDataSync.ts';
 import { formatTaka, toBengaliDigits, getTodayDhakaDate, formatBengaliDate } from '../utils/formatters.ts';
+import { groupSchedulesByRouteNumber } from '../utils/routeSort.ts';
 import {
   Armchair,
-  Bus,
   Calendar,
-  Clock,
   User,
   Phone,
   MapPin,
@@ -18,8 +18,8 @@ import {
   AlertTriangle,
   Printer,
   RefreshCw,
-  Search,
   Check,
+  FileSpreadsheet,
 } from 'lucide-react';
 
 export const BookingPage: React.FC = () => {
@@ -56,25 +56,38 @@ export const BookingPage: React.FC = () => {
     try {
       const res = await api.getCounters();
       setCounters(res.counters);
-      if (!selectedCounterId && res.counters.length > 0) {
-        setSelectedCounterId(user?.counterId || res.counters[0].id);
-      }
     } catch (err) {
       console.error('Failed to load counters:', err);
     }
   };
 
-  // Load schedules for date and direction
+  const directionCounters = counters.filter((c) => c.status === 'active' && c.tripDirection === direction);
+
+  useEffect(() => {
+    if (directionCounters.length > 0) {
+      const match = directionCounters.find((c) => c.id === selectedCounterId);
+      if (!match) {
+        setSelectedCounterId(directionCounters[0].id);
+      }
+    }
+  }, [direction, counters]);
+
+  // Load schedules strictly for selected calendar date and direction
   const fetchSchedules = async () => {
     setLoading(true);
     try {
-      const res = await api.getSchedules({ date, direction });
-      setSchedules(res.schedules);
-      if (res.schedules.length > 0) {
-        // Auto select first schedule if current is not in list
-        const exists = res.schedules.some((s) => s.id === selectedScheduleId);
+      const res = await api.getSchedules({ date, direction, exactDateOnly: true });
+      const exactMatches = (res.schedules || []).filter(
+        (s) => s.date === date && s.status !== 'cancelled'
+      );
+      const grouped = groupSchedulesByRouteNumber(exactMatches);
+      const orderedSchedules = grouped.flatMap((g) => g.trips);
+
+      setSchedules(orderedSchedules);
+      if (orderedSchedules.length > 0) {
+        const exists = orderedSchedules.some((s) => s.id === selectedScheduleId);
         if (!exists) {
-          setSelectedScheduleId(res.schedules[0].id);
+          setSelectedScheduleId(orderedSchedules[0].id);
         }
       } else {
         setSelectedScheduleId('');
@@ -120,6 +133,16 @@ export const BookingPage: React.FC = () => {
       setSuccessMsg('');
     }
   }, [selectedScheduleId]);
+
+  // Real-time synchronization across pages and tabs
+  useDataSync(
+    useCallback(() => {
+      fetchSchedules();
+      if (selectedScheduleId) {
+        fetchScheduleDetails(selectedScheduleId);
+      }
+    }, [selectedScheduleId, date, direction])
+  );
 
   // Seat click toggle
   const handleSeatToggle = (seatId: string) => {
@@ -194,6 +217,9 @@ export const BookingPage: React.FC = () => {
 
   const currentTotalFare = manualFare !== '' && !isNaN(Number(manualFare)) ? Number(manualFare) : 0;
 
+  const todayDhaka = getTodayDhakaDate();
+  const routeGroups = groupSchedulesByRouteNumber(schedules);
+
   return (
     <div className="space-y-6">
       {/* Top Controls: Date, Direction & Schedule Selector */}
@@ -216,7 +242,7 @@ export const BookingPage: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setDirection('UP')}
-                className={`px-3 py-1.5 rounded-lg transition-all ${
+                className={`px-3 py-1.5 rounded-lg transition-all whitespace-nowrap shrink-0 ${
                   direction === 'UP'
                     ? 'bg-blue-600 text-white shadow-xs'
                     : 'text-slate-600 hover:text-slate-900'
@@ -227,7 +253,7 @@ export const BookingPage: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setDirection('DOWN')}
-                className={`px-3 py-1.5 rounded-lg transition-all ${
+                className={`px-3 py-1.5 rounded-lg transition-all whitespace-nowrap shrink-0 ${
                   direction === 'DOWN'
                     ? 'bg-emerald-600 text-white shadow-xs'
                     : 'text-slate-600 hover:text-slate-900'
@@ -237,7 +263,7 @@ export const BookingPage: React.FC = () => {
               </button>
             </div>
 
-            {/* Date Selector */}
+            {/* Date Selector (Defaults to Today) */}
             <div className="flex items-center gap-2 bg-slate-50 px-3 py-1.5 rounded-xl border border-slate-300 text-xs font-semibold">
               <Calendar className="w-4 h-4 text-emerald-600" />
               <input
@@ -247,6 +273,16 @@ export const BookingPage: React.FC = () => {
                 className="bg-transparent outline-none cursor-pointer"
               />
             </div>
+
+            {date !== todayDhaka && (
+              <button
+                type="button"
+                onClick={() => setDate(todayDhaka)}
+                className="px-2.5 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 rounded-xl text-xs font-bold transition-colors whitespace-nowrap shrink-0"
+              >
+                আজকের তারিখ
+              </button>
+            )}
 
             <button
               type="button"
@@ -262,68 +298,146 @@ export const BookingPage: React.FC = () => {
           </div>
         </div>
 
-        {/* Trip Schedule Horizontal Carousel / Cards */}
-        <div>
-          <label className="block text-xs font-bold text-slate-700 mb-2">
-            আজকের নির্ধারিত ট্রিপ তালিকা ({toBengaliDigits(schedules.length)} টি ট্রিপ বিদ্যমান):
-          </label>
+        {/* Excel-Sheet Style Trip Schedule Table (Grouped by Route 1/2/3 & Sorted by Time) */}
+        <div className="space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-xs font-bold text-slate-800">
+              <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
+              <span>
+                নির্ধারিত ট্রিপ তালিকা ({formatBengaliDate(date)} · {toBengaliDigits(schedules.length)} টি ট্রিপ)
+              </span>
+            </div>
+            <span className="text-[11px] text-slate-500">
+              রুট নং (১, ২, ৩...) ও ছাড়ার সময় অনুযায়ী সাজানো · বুকিং করতে সারিতে ক্লিক করুন
+            </span>
+          </div>
 
           {schedules.length === 0 ? (
-            <div className="p-4 bg-slate-50 rounded-xl text-center text-xs text-slate-500 border border-slate-200">
-              নির্বাচিত তারিখে কোনো {direction === 'UP' ? 'আপ ট্রিপ' : 'ডাউন ট্রিপ'} শিডিউল পাওয়া যায়নি। শিডিউল মেকার থেকে ট্রিপ যোগ করুন।
+            <div className="p-5 bg-slate-50 rounded-xl text-center text-xs text-slate-500 border border-slate-200">
+              নির্বাচিত তারিখ ({formatBengaliDate(date)}) এ কোনো{' '}
+              {direction === 'UP' ? 'আপ ট্রিপ' : 'ডাউন ট্রিপ'} শিডিউল পাওয়া যায়নি। শিডিউল মেকার থেকে ট্রিপ যোগ করুন।
             </div>
           ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-              {schedules.map((sch) => {
-                const isSelected = sch.id === selectedScheduleId;
-                const bookedCount = sch.totalBookedSeats || 0;
-                const availableCount = sch.seatCapacity - bookedCount;
-
-                return (
-                  <button
-                    key={sch.id}
-                    type="button"
-                    onClick={() => setSelectedScheduleId(sch.id)}
-                    className={`p-3 rounded-2xl text-left border transition-all relative ${
-                      isSelected
-                        ? 'border-emerald-600 bg-emerald-50/50 shadow-md ring-2 ring-emerald-500/20'
-                        : 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50'
+            <div className="space-y-4">
+              {routeGroups.map((group) => (
+                <div
+                  key={`${direction}-${group.routeName}`}
+                  className="border border-slate-300 rounded-xl overflow-hidden bg-white"
+                >
+                  {/* Route Header Strip */}
+                  <div
+                    className={`px-3.5 py-2 border-b border-slate-300 flex flex-wrap items-center justify-between gap-2 text-xs ${
+                      direction === 'UP'
+                        ? 'bg-blue-50/90 text-blue-950'
+                        : 'bg-emerald-50/90 text-emerald-950'
                     }`}
                   >
-                    <div className="flex items-center justify-between mb-1.5">
-                      <span className="text-xs font-black text-slate-900">{sch.tripNo}</span>
-                      <span className="text-[11px] font-bold text-emerald-700 bg-emerald-100/80 px-2 py-0.5 rounded-full">
-                        {sch.departureTime}
+                    <div className="flex items-center gap-2 font-bold">
+                      <span
+                        className={`px-2 py-0.5 rounded text-[11px] font-black text-white tabular-nums ${
+                          direction === 'UP' ? 'bg-blue-700' : 'bg-emerald-700'
+                        }`}
+                      >
+                        {toBengaliDigits(group.routeNumber)} নং রুট
                       </span>
+                      <span>{group.routeName}</span>
                     </div>
+                    <span className="text-[11px] font-semibold text-slate-600 tabular-nums">
+                      মোট {toBengaliDigits(group.trips.length)} টি ট্রিপ · সময়ানুসারে ক্রমিক
+                    </span>
+                  </div>
 
-                    <div className="flex items-center justify-between text-xs font-semibold text-slate-800">
-                      <span className="truncate">{sch.vehicleRegNo}</span>
-                      {sch.tripSequenceLabel && (
-                        <span className="px-1.5 py-0.2 rounded text-[10px] font-black bg-amber-100 text-amber-800 border border-amber-300">
-                          {sch.tripSequenceLabel}
-                        </span>
-                      )}
-                    </div>
-                    <div className="text-[11px] text-slate-500 truncate">{sch.routeName}</div>
+                  {/* Excel Grid Table */}
+                  <div className="overflow-x-auto">
+                    <table className="w-full border-collapse text-left text-xs">
+                      <thead>
+                        <tr className="bg-slate-100 border-b border-slate-300 text-slate-700 font-bold text-[11px]">
+                          <th className="py-2 px-2.5 border-r border-slate-300 text-center w-12">ক্রম</th>
+                          <th className="py-2 px-2.5 border-r border-slate-300 whitespace-nowrap">তারিখ</th>
+                          <th className="py-2 px-2.5 border-r border-slate-300 whitespace-nowrap">ট্রিপ নং</th>
+                          <th className="py-2 px-2.5 border-r border-slate-300 whitespace-nowrap">ছাড়ার সময়</th>
+                          <th className="py-2 px-2.5 border-r border-slate-300 whitespace-nowrap">গাড়ি নম্বর</th>
+                          <th className="py-2 px-2.5 border-r border-slate-300 whitespace-nowrap">সুপারভাইজার</th>
+                          <th className="py-2 px-2.5 border-r border-slate-300 text-center whitespace-nowrap">খালি আসন</th>
+                          <th className="py-2 px-2.5 text-center whitespace-nowrap">বুকিং সিলেক্ট</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-200">
+                        {group.trips.map((sch) => {
+                          const isSelected = sch.id === selectedScheduleId;
+                          const bookedCount = sch.totalBookedSeats || 0;
+                          const availableCount = sch.seatCapacity - bookedCount;
 
-                    <div className="mt-2.5 pt-2 border-t border-slate-200/60 flex items-center justify-between text-[11px]">
-                      <span className="text-slate-500">
-                        খালি: <strong className="text-emerald-700">{toBengaliDigits(availableCount)}</strong>/{toBengaliDigits(sch.seatCapacity)}
-                      </span>
-                      <span className="font-semibold text-slate-700 bg-slate-100 px-2 py-0.5 rounded text-[10px]">
-                        ম্যানুয়াল ভাড়া
-                      </span>
-                    </div>
-
-                    {sch.isNightHold && (
-                      <span className="absolute -top-2 right-2 px-1.5 py-0.5 bg-purple-600 text-white text-[9px] font-bold rounded-md uppercase">
-                        নাইট হোল্ড
-                      </span>
-                    )}
-                  </button>
-                );
-              })}
+                          return (
+                            <tr
+                              key={sch.id}
+                              onClick={() => setSelectedScheduleId(sch.id)}
+                              className={`cursor-pointer transition-colors ${
+                                isSelected
+                                  ? 'bg-emerald-50/90 font-semibold'
+                                  : 'bg-white hover:bg-slate-50'
+                              }`}
+                            >
+                              <td className="py-2 px-2.5 border-r border-slate-200 text-center font-bold text-slate-700 bg-slate-50/60 tabular-nums">
+                                {toBengaliDigits(sch.serialInRoute)}
+                              </td>
+                              <td className="py-2 px-2.5 border-r border-slate-200 text-slate-700 whitespace-nowrap tabular-nums">
+                                {formatBengaliDate(sch.date)}
+                              </td>
+                              <td className="py-2 px-2.5 border-r border-slate-200 font-mono font-bold text-slate-900 whitespace-nowrap">
+                                <span>{sch.tripNo}</span>
+                                {sch.tripSequenceLabel && (
+                                  <span className="ml-1.5 text-[10px] font-sans font-bold text-amber-700">
+                                    ({sch.tripSequenceLabel})
+                                  </span>
+                                )}
+                                {sch.isNightHold && (
+                                  <span className="ml-1.5 text-[10px] font-sans font-bold text-purple-700">
+                                    · নাইট হোল্ড
+                                  </span>
+                                )}
+                              </td>
+                              <td className="py-2 px-2.5 border-r border-slate-200 font-mono font-bold text-slate-900 whitespace-nowrap tabular-nums">
+                                {sch.departureTime}
+                              </td>
+                              <td className="py-2 px-2.5 border-r border-slate-200 font-bold text-slate-900 whitespace-nowrap tabular-nums">
+                                {sch.vehicleRegNo}
+                              </td>
+                              <td className="py-2 px-2.5 border-r border-slate-200 text-slate-800 whitespace-nowrap">
+                                {sch.supervisor || 'অনির্ধারিত'}
+                              </td>
+                              <td className="py-2 px-2.5 border-r border-slate-200 text-center whitespace-nowrap tabular-nums">
+                                <span className="font-bold text-emerald-700">
+                                  {toBengaliDigits(availableCount)}
+                                </span>
+                                <span className="text-slate-400">
+                                  /{toBengaliDigits(sch.seatCapacity)}
+                                </span>
+                              </td>
+                              <td className="py-2 px-2.5 text-center whitespace-nowrap">
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setSelectedScheduleId(sch.id);
+                                  }}
+                                  className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                                    isSelected
+                                      ? 'bg-emerald-600 text-white'
+                                      : 'bg-slate-100 hover:bg-slate-200 text-slate-800'
+                                  }`}
+                                >
+                                  {isSelected ? 'নির্বাচিত' : 'নির্বাচন করুন'}
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              ))}
             </div>
           )}
         </div>
@@ -616,6 +730,24 @@ export const BookingPage: React.FC = () => {
                       />
                     </div>
                   </div>
+                  {(isMasterAdmin || isModerator) && directionCounters.length > 1 && (
+                    <div className="sm:col-span-2">
+                      <label className="block text-xs font-bold text-slate-700 mb-1">
+                        বুকিং ইস্যুকারী কাউন্টার ({direction === 'UP' ? 'আপ কাউন্টারসমূহ' : 'ডাউন কাউন্টারসমূহ'})
+                      </label>
+                      <select
+                        value={selectedCounterId}
+                        onChange={(e) => setSelectedCounterId(e.target.value)}
+                        className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-bold focus:bg-white outline-none"
+                      >
+                        {directionCounters.map((cnt) => (
+                          <option key={cnt.id} value={cnt.id}>
+                            {cnt.name} ({cnt.code})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
                 </div>
 
                 <button

@@ -1,4 +1,5 @@
 import express from 'express';
+import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
@@ -11,11 +12,12 @@ const __dirname = path.dirname(__filename);
 
 async function startServer() {
   const app = express();
+  const httpServer = http.createServer(app);
   const PORT = Number(process.env.PORT) || 3000;
 
-  // JSON Body Parser
-  app.use(express.json());
-  app.use(express.urlencoded({ extended: true }));
+  // JSON Body Parser with 50MB limit for high-res logo and image uploads
+  app.use(express.json({ limit: '50mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
   // Explicitly serve /sw.js with Service-Worker headers
   app.get('/sw.js', (req, res) => {
@@ -47,7 +49,10 @@ async function startServer() {
     // Development mode: Mount Vite dev server middleware
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: process.env.DISABLE_HMR === 'true' ? false : { server: httpServer },
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);
@@ -60,7 +65,7 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`🚌 ZB SYSTEM Server running on http://0.0.0.0:${PORT}`);
   });
 }

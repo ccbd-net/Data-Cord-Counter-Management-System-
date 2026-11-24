@@ -18,6 +18,7 @@ import { AiSummaryPage } from './pages/AiSummaryPage.tsx';
 import { SettingsPage } from './pages/SettingsPage.tsx';
 import { CompanyAdminPage } from './pages/CompanyAdminPage.tsx';
 import { DatabasePage } from './pages/DatabasePage.tsx';
+import { FuelManagementPage } from './pages/FuelManagementPage.tsx';
 
 const TAB_TITLES: Record<NavTab, string> = {
   dashboard: 'ড্যাশবোর্ড',
@@ -27,6 +28,7 @@ const TAB_TITLES: Record<NavTab, string> = {
   daily_schedules: 'দৈনিক ট্রিপ শিডিউল ও ফিরতি লগ',
   schedule_maker: 'শিডিউল মেকার',
   reconciliation: 'ট্রিপ হিসাব সমন্বয়',
+  fuel_management: 'জ্বালানি ব্যবস্থাপনা ও ডিজেল লগ',
   counters: 'কাউন্টার ব্যবস্থাপনা',
   vehicles: 'গাড়ি ব্যবস্থাপনা',
   routes: 'রুট ব্যবস্থাপনা',
@@ -37,10 +39,25 @@ const TAB_TITLES: Record<NavTab, string> = {
 
 import { PWAInstallBanner } from './components/PWAInstallBanner.tsx';
 
+const VALID_TABS = new Set<NavTab>(Object.keys(TAB_TITLES) as NavTab[]);
+
 function MainLayout() {
   const { user, loading } = useAuth();
-  const [currentTab, setCurrentTab] = useState<NavTab>('dashboard');
+  const [currentTab, setCurrentTabState] = useState<NavTab>(() => {
+    try {
+      const saved = localStorage.getItem('zb_active_tab') as NavTab | null;
+      if (saved && VALID_TABS.has(saved)) return saved;
+    } catch {}
+    return 'dashboard';
+  });
   const [mobileMenuOpen, setMobileMenuOpen] = useState<boolean>(false);
+
+  const setCurrentTab = (tab: NavTab) => {
+    try {
+      localStorage.setItem('zb_active_tab', tab);
+    } catch {}
+    setCurrentTabState(tab);
+  };
 
   if (loading) {
     return (
@@ -88,6 +105,8 @@ function MainLayout() {
         );
       case 'reconciliation':
         return <ReconciliationPage />;
+      case 'fuel_management':
+        return <FuelManagementPage />;
       case 'counters':
         return <CountersPage />;
       case 'vehicles':

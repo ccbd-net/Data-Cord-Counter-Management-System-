@@ -20,7 +20,7 @@ import {
 } from 'lucide-react';
 
 export const CountersPage: React.FC = () => {
-  const { isMasterAdmin } = useAuth();
+  const { isMasterAdmin, activeCompanyId, user } = useAuth();
   const [counters, setCounters] = useState<(Counter & { assignedUsers?: any[] })[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [searchTerm, setSearchTerm] = useState<string>('');
@@ -34,7 +34,7 @@ export const CountersPage: React.FC = () => {
   const [phone, setPhone] = useState<string>('');
   const [seatColor, setSeatColor] = useState<string>('#2563EB');
   const [counterType, setCounterType] = useState<'master_booking' | 'road_booking'>('road_booking');
-  const [tripDirection, setTripDirection] = useState<'UP' | 'DOWN' | 'BOTH'>('BOTH');
+  const [tripDirection, setTripDirection] = useState<'UP' | 'DOWN'>('UP');
   const [directionFilter, setDirectionFilter] = useState<'ALL' | 'UP' | 'DOWN'>('ALL');
   const [status, setStatus] = useState<'active' | 'inactive'>('active');
 
@@ -78,7 +78,7 @@ export const CountersPage: React.FC = () => {
     setAddress('');
     setPhone('');
     setCounterType('road_booking');
-    setTripDirection('BOTH');
+    setTripDirection('UP');
     // Pick an unused preset color if available
     const usedColors = new Set(counters.filter((c) => c.status === 'active').map((c) => c.seatColor.toUpperCase()));
     const available = presetColors.find((c) => !usedColors.has(c.toUpperCase())) || '#2563EB';
@@ -96,7 +96,7 @@ export const CountersPage: React.FC = () => {
     setPhone(c.phone || '');
     setSeatColor(c.seatColor || '#2563EB');
     setCounterType(c.counterType || 'road_booking');
-    setTripDirection(c.tripDirection || 'BOTH');
+    setTripDirection(c.tripDirection === 'DOWN' ? 'DOWN' : 'UP');
     setStatus(c.status || 'active');
     setErrorMsg('');
     setIsModalOpen(true);
@@ -129,6 +129,7 @@ export const CountersPage: React.FC = () => {
           seatColor,
           counterType,
           tripDirection,
+          companyId: activeCompanyId || user?.companyId,
         });
         setSuccessMsg(`নতুন কাউন্টার "${name}" সফলভাবে যুক্ত হয়েছে!`);
       }
@@ -155,8 +156,8 @@ export const CountersPage: React.FC = () => {
   };
 
   const filteredCounters = counters.filter((c) => {
-    if (directionFilter === 'UP' && c.tripDirection !== 'UP' && c.tripDirection !== 'BOTH') return false;
-    if (directionFilter === 'DOWN' && c.tripDirection !== 'DOWN' && c.tripDirection !== 'BOTH') return false;
+    if (directionFilter === 'UP' && c.tripDirection !== 'UP') return false;
+    if (directionFilter === 'DOWN' && c.tripDirection !== 'DOWN') return false;
     if (!searchTerm.trim()) return true;
     const term = searchTerm.toLowerCase();
     return (
@@ -459,51 +460,39 @@ export const CountersPage: React.FC = () => {
                 </div>
               </div>
 
-              {/* Trip Direction: UP / DOWN / BOTH */}
+              {/* Trip Direction: UP / DOWN */}
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1.5">
-                  কাউন্টার ট্রিপ ধরন (আপ ট্রিপ / ডাউন ট্রিপ কাউন্টার) *
+                  কাউন্টার ট্রিপ ধরন (১. আপ কাউন্টার / ২. ডাউন কাউন্টার) *
                 </label>
-                <div className="grid grid-cols-3 gap-2">
+                <div className="grid grid-cols-2 gap-2.5">
                   <button
                     type="button"
                     onClick={() => setTripDirection('UP')}
-                    className={`p-2.5 rounded-xl border text-center transition-all cursor-pointer ${
+                    className={`p-3 rounded-xl border text-center transition-all cursor-pointer ${
                       tripDirection === 'UP'
                         ? 'bg-blue-50 border-blue-600 text-blue-900 ring-2 ring-blue-500/20 font-bold'
                         : 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100'
                     }`}
                   >
-                    <div className="text-xs font-bold">আপ কাউন্টার</div>
-                    <div className="text-[10px] text-slate-500 mt-0.5">মাদারীপুর পয়েন্ট</div>
+                    <div className="text-xs font-bold">১. আপ কাউন্টার (UP)</div>
+                    <div className="text-[10px] text-slate-500 mt-0.5">মাদারীপুর / প্রান্তিক পয়েন্ট</div>
                   </button>
                   <button
                     type="button"
                     onClick={() => setTripDirection('DOWN')}
-                    className={`p-2.5 rounded-xl border text-center transition-all cursor-pointer ${
+                    className={`p-3 rounded-xl border text-center transition-all cursor-pointer ${
                       tripDirection === 'DOWN'
                         ? 'bg-emerald-50 border-emerald-600 text-emerald-900 ring-2 ring-emerald-500/20 font-bold'
                         : 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100'
                     }`}
                   >
-                    <div className="text-xs font-bold">ডাউন কাউন্টার</div>
-                    <div className="text-[10px] text-slate-500 mt-0.5">ঢাকা পয়েন্ট</div>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setTripDirection('BOTH')}
-                    className={`p-2.5 rounded-xl border text-center transition-all cursor-pointer ${
-                      tripDirection === 'BOTH'
-                        ? 'bg-purple-50 border-purple-600 text-purple-900 ring-2 ring-purple-500/20 font-bold'
-                        : 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100'
-                    }`}
-                  >
-                    <div className="text-xs font-bold">উভয় ট্রিপ</div>
-                    <div className="text-[10px] text-slate-500 mt-0.5">সব ট্রিপে বিদ্যমান</div>
+                    <div className="text-xs font-bold">২. ডাউন কাউন্টার (DOWN)</div>
+                    <div className="text-[10px] text-slate-500 mt-0.5">ঢাকা / গন্তব্য পয়েন্ট</div>
                   </button>
                 </div>
-                <p className="text-[11px] text-slate-500 mt-1">
-                  আপ ও ডাউন ট্রিপে সিট বুকিংয়ের সময় কাউন্টার নির্দিষ্ট থাকবে, ফলে ভুল বুকিং বা কাউন্টার মিশ্রণ ঘটবে না।
+                <p className="text-[11px] text-slate-500 mt-1.5">
+                  আপ কাউন্টার কেবল আপ ট্রিপে এবং ডাউন কাউন্টার কেবল ডাউন ট্রিপে বুকিং করতে পারবে — কোনো মিশ্রণ ঘটবে না।
                 </p>
               </div>
 

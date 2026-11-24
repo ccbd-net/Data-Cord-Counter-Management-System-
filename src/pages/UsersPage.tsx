@@ -24,7 +24,7 @@ import {
 } from 'lucide-react';
 
 export const UsersPage: React.FC = () => {
-  const { user: currentUser, isMasterAdmin } = useAuth();
+  const { user: currentUser, isMasterAdmin, activeCompanyId } = useAuth();
   const [activeTab, setActiveTab] = useState<'users' | 'supervisors' | 'drivers'>('users');
   const [users, setUsers] = useState<User[]>([]);
   const [supervisors, setSupervisors] = useState<Supervisor[]>([]);
@@ -44,15 +44,17 @@ export const UsersPage: React.FC = () => {
   const [pin, setPin] = useState<string>('');
   const [status, setStatus] = useState<'active' | 'inactive'>('active');
 
-  // Supervisor Modal State (Name only, NO phone)
+  // Supervisor Modal State (Name & Optional Phone)
   const [isSupModalOpen, setIsSupModalOpen] = useState<boolean>(false);
   const [editingSup, setEditingSup] = useState<Supervisor | null>(null);
   const [supName, setSupName] = useState<string>('');
+  const [supPhone, setSupPhone] = useState<string>('');
 
-  // Driver Modal State (Name only, NO login)
+  // Driver Modal State (Name & Optional Phone)
   const [isDriverModalOpen, setIsDriverModalOpen] = useState<boolean>(false);
   const [editingDriver, setEditingDriver] = useState<Driver | null>(null);
   const [driverName, setDriverName] = useState<string>('');
+  const [driverPhone, setDriverPhone] = useState<string>('');
 
   const [errorMsg, setErrorMsg] = useState<string>('');
   const [successMsg, setSuccessMsg] = useState<string>('');
@@ -136,6 +138,7 @@ export const UsersPage: React.FC = () => {
           counterId: role === 'booking_point' ? counterId : undefined,
           phone,
           pin,
+          companyId: activeCompanyId || currentUser?.companyId,
         });
         setSuccessMsg(`নতুন ব্যবহারকারী "${name}" সফলভাবে তৈরি হয়েছে!`);
       }
@@ -165,10 +168,11 @@ export const UsersPage: React.FC = () => {
     }
   };
 
-  // SUPERVISOR CRUD (Strictly name directory - NO login)
+  // SUPERVISOR CRUD (Name & Optional Phone - NO login)
   const openAddSupModal = () => {
     setEditingSup(null);
     setSupName('');
+    setSupPhone('');
     setErrorMsg('');
     setIsSupModalOpen(true);
   };
@@ -176,6 +180,7 @@ export const UsersPage: React.FC = () => {
   const openEditSupModal = (s: Supervisor) => {
     setEditingSup(s);
     setSupName(s.name ?? '');
+    setSupPhone(s.phone ?? '');
     setErrorMsg('');
     setIsSupModalOpen(true);
   };
@@ -194,11 +199,14 @@ export const UsersPage: React.FC = () => {
       if (editingSup) {
         await api.updateSupervisor(editingSup.id, {
           name: supName.trim(),
+          phone: supPhone.trim() || '',
         });
         setSuccessMsg(`সুপারভাইজার "${supName}" এর তথ্য আপডেট হয়েছে!`);
       } else {
         await api.createSupervisor({
           name: supName.trim(),
+          phone: supPhone.trim() || undefined,
+          companyId: activeCompanyId || currentUser?.companyId,
         });
         setSuccessMsg(`নতুন সুপারভাইজার "${supName}" সফলভাবে তালিকায় যুক্ত হয়েছে!`);
       }
@@ -224,10 +232,11 @@ export const UsersPage: React.FC = () => {
     }
   };
 
-  // DRIVER CRUD (Strictly name directory - NO login)
+  // DRIVER CRUD (Name & Optional Phone - NO login)
   const openAddDriverModal = () => {
     setEditingDriver(null);
     setDriverName('');
+    setDriverPhone('');
     setErrorMsg('');
     setIsDriverModalOpen(true);
   };
@@ -235,6 +244,7 @@ export const UsersPage: React.FC = () => {
   const openEditDriverModal = (d: Driver) => {
     setEditingDriver(d);
     setDriverName(d.name ?? '');
+    setDriverPhone(d.phone ?? '');
     setErrorMsg('');
     setIsDriverModalOpen(true);
   };
@@ -253,11 +263,14 @@ export const UsersPage: React.FC = () => {
       if (editingDriver) {
         await api.updateDriver(editingDriver.id, {
           name: driverName.trim(),
+          phone: driverPhone.trim() || '',
         });
         setSuccessMsg(`ড্রাইভার "${driverName}" এর তথ্য আপডেট হয়েছে!`);
       } else {
         await api.createDriver({
           name: driverName.trim(),
+          phone: driverPhone.trim() || undefined,
+          companyId: activeCompanyId || currentUser?.companyId,
         });
         setSuccessMsg(`নতুন ড্রাইভার "${driverName}" সফলভাবে তালিকায় যুক্ত হয়েছে!`);
       }
@@ -556,71 +569,93 @@ export const UsersPage: React.FC = () => {
         </div>
       )}
 
-      {/* TAB 2: SUPERVISORS DIRECTORY (NO LOGIN, NAME ONLY) */}
+      {/* TAB 2: SUPERVISORS DIRECTORY (NO LOGIN, EXCEL GRID LAYOUT) */}
       {activeTab === 'supervisors' && (
         <div className="space-y-4">
           <div className="bg-blue-50 border border-blue-200 text-blue-900 rounded-2xl p-4 text-xs">
             <h4 className="font-bold flex items-center gap-1.5 mb-1">
               <Briefcase className="w-4 h-4 text-blue-600" />
-              <span>সুপারভাইজার তালিকা নির্দেশিকা (শুধু নাম)</span>
+              <span>সুপারভাইজার তালিকা ও ট্রিপ রেংকিং (এক্সেল শিট ভিউ)</span>
             </h4>
             <p className="text-slate-700 leading-relaxed">
-              সুপারভাইজারদের সিস্টেমে কোনো নিজস্ব লগইন বা মোবাইল নম্বরের প্রয়োজন নেই। তারা শুধুমাত্র নামের তালিকায় অন্তর্ভুক্ত থাকেন এবং শিডিউল মেকিং বা ট্রিপ বরাদ্দের সময় ড্রপডাউন থেকে তাদের নির্বাচিত করা হয়।
+              সুপারভাইজারদের কোনো নিজস্ব লগইন বা রোল নেই। নাম ও মোবাইল (ঐচ্ছিক) সংরক্ষিত থাকে। আপ ও ডাউন ট্রিপ সমন্বয় হওয়ার পর তাদের মোট পূর্ণাঙ্গ ট্রিপ সংখ্যা স্বয়ংক্রিয়ভাবে এডজাস্ট হয় এবং সর্বোচ্চ ট্রিপের ভিত্তিতে র্যাঙ্কিং প্রদর্শন করে।
             </p>
           </div>
 
-          <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
+          <div className="bg-white rounded-xl border border-slate-300 shadow-xs overflow-hidden">
             <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse text-xs">
+              <table className="w-full text-left border-collapse border border-slate-300 text-xs">
                 <thead>
-                  <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold uppercase tracking-wider text-[11px]">
-                    <th className="py-3 px-4">ক্রমিক</th>
-                    <th className="py-3 px-4">সুপারভাইজারের নাম</th>
-                    <th className="py-3 px-4">যোগদানের তারিখ</th>
-                    <th className="py-3 px-4">ব্যবহারের ক্ষেত্র</th>
-                    <th className="py-3 px-4 text-center">স্ট্যাটাস</th>
-                    {isMasterAdmin && <th className="py-3 px-4 text-right">একশন</th>}
+                  <tr className="bg-slate-100 border-b border-slate-300 text-slate-700 font-bold uppercase text-[11px]">
+                    <th className="py-2.5 px-3 border-r border-slate-300 text-center w-20">র্যাঙ্কিং</th>
+                    <th className="py-2.5 px-3 border-r border-slate-300">সুপারভাইজারের নাম</th>
+                    <th className="py-2.5 px-3 border-r border-slate-300">মোবাইল (ঐচ্ছিক)</th>
+                    <th className="py-2.5 px-3 border-r border-slate-300 text-center bg-blue-50/60 font-black text-blue-900">
+                      মোট পূর্ণাঙ্গ ট্রিপ (সমন্বয়কৃত)
+                    </th>
+                    <th className="py-2.5 px-3 border-r border-slate-300">তালিকাভুক্তির তারিখ</th>
+                    <th className="py-2.5 px-3 border-r border-slate-300 text-center w-24">স্ট্যাটাস</th>
+                    {isMasterAdmin && <th className="py-2.5 px-3 text-right w-24">একশন</th>}
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100 font-medium">
+                <tbody className="divide-y divide-slate-200 font-medium">
                   {filteredSupervisors.length === 0 ? (
                     <tr>
-                      <td colSpan={6} className="py-8 text-center text-slate-400">
-                        কোনো সুপারভাইজার যুক্ত করা নেই। "+ নতুন সুপারভাইজার যোগ করুন" বাটনে ক্লিক করে নাম যুক্ত করুন।
+                      <td colSpan={7} className="py-8 text-center text-slate-400 border border-slate-300">
+                        কোনো সুপারভাইজার পাওয়া যায়নি। "+ নতুন সুপারভাইজার যোগ করুন" বাটনে ক্লিক করে নাম যুক্ত করুন।
                       </td>
                     </tr>
                   ) : (
                     filteredSupervisors.map((s, idx) => (
                       <tr key={s.id} className="hover:bg-slate-50 transition-colors">
-                        <td className="py-3 px-4 font-mono font-bold text-slate-500">
-                          {toBengaliDigits(idx + 1)}
+                        <td className="py-2.5 px-3 border-r border-slate-200 text-center">
+                          <span
+                            className={`inline-flex items-center justify-center w-7 h-7 rounded-md font-black text-xs ${
+                              idx === 0
+                                ? 'bg-amber-100 text-amber-900 border border-amber-300'
+                                : idx === 1
+                                ? 'bg-slate-200 text-slate-800 border border-slate-300'
+                                : idx === 2
+                                ? 'bg-amber-50 text-amber-800 border border-amber-200'
+                                : 'bg-slate-100 text-slate-600'
+                            }`}
+                          >
+                            #{toBengaliDigits(s.rank || idx + 1)}
+                          </span>
                         </td>
-                        <td className="py-3 px-4">
-                          <div className="font-bold text-slate-900 flex items-center gap-2">
-                            <div className="w-7 h-7 rounded-lg bg-blue-50 text-blue-700 flex items-center justify-center font-bold text-xs">
-                              {s.name.slice(0, 1)}
+                        <td className="py-2.5 px-3 border-r border-slate-200">
+                          <div className="font-bold text-slate-900">{s.name}</div>
+                        </td>
+                        <td className="py-2.5 px-3 border-r border-slate-200 font-mono text-slate-700">
+                          {s.phone ? (
+                            <div className="flex items-center gap-1">
+                              <Phone className="w-3 h-3 text-slate-400" />
+                              <span>{s.phone}</span>
                             </div>
-                            <span>{s.name}</span>
-                          </div>
+                          ) : (
+                            <span className="text-slate-400 italic">প্রযোজ্য নয়</span>
+                          )}
                         </td>
-                        <td className="py-3 px-4 text-slate-600 font-mono text-[11px]">
+                        <td className="py-2.5 px-3 border-r border-slate-200 text-center bg-blue-50/20 font-bold">
+                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black bg-blue-100 text-blue-900 border border-blue-200">
+                            {toBengaliDigits(s.totalTrips || 0)} টি ট্রিপ
+                          </span>
+                        </td>
+                        <td className="py-2.5 px-3 border-r border-slate-200 text-slate-600 font-mono text-[11px]">
                           {formatBengaliDateTime(s.createdAt)}
                         </td>
-                        <td className="py-3 px-4 text-slate-600">
-                          শিডিউল মেকার ও ট্রিপ বরাদ্দ
-                        </td>
-                        <td className="py-3 px-4 text-center">
-                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">
+                        <td className="py-2.5 px-3 border-r border-slate-200 text-center">
+                          <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">
                             সক্রিয়
                           </span>
                         </td>
                         {isMasterAdmin && (
-                          <td className="py-3 px-4 text-right">
+                          <td className="py-2.5 px-3 text-right">
                             <div className="flex items-center justify-end gap-1.5">
                               <button
                                 type="button"
                                 onClick={() => openEditSupModal(s)}
-                                className="p-1.5 text-blue-600 hover:bg-blue-50 rounded-xl transition-colors font-semibold"
+                                className="p-1.5 text-blue-600 hover:bg-blue-100 rounded-lg transition-colors font-semibold"
                                 title="সম্পাদনা"
                               >
                                 <Edit className="w-3.5 h-3.5" />
@@ -628,7 +663,7 @@ export const UsersPage: React.FC = () => {
                               <button
                                 type="button"
                                 onClick={() => handleDeleteSupervisor(s)}
-                                className="p-1.5 text-red-600 hover:bg-red-50 rounded-xl transition-colors font-semibold"
+                                className="p-1.5 text-red-600 hover:bg-red-100 rounded-lg transition-colors font-semibold"
                                 title="মুছে ফেলুন"
                               >
                                 <Trash2 className="w-3.5 h-3.5" />
@@ -646,71 +681,93 @@ export const UsersPage: React.FC = () => {
         </div>
       )}
 
-      {/* TAB 3: DRIVERS DIRECTORY (NAME ONLY, NO LOGIN) */}
+      {/* TAB 3: DRIVERS DIRECTORY (NO LOGIN, EXCEL GRID LAYOUT) */}
       {activeTab === 'drivers' && (
         <div className="space-y-4">
           <div className="bg-indigo-50 border border-indigo-200 text-indigo-900 rounded-2xl p-4 text-xs">
             <h4 className="font-bold flex items-center gap-1.5 mb-1">
               <Truck className="w-4 h-4 text-indigo-600" />
-              <span>ড্রাইভার তালিকা নির্দেশিকা (শুধু নাম)</span>
+              <span>ড্রাইভার তালিকা ও ট্রিপ রেংকিং (এক্সেল শিট ভিউ)</span>
             </h4>
             <p className="text-slate-700 leading-relaxed">
-              ড্রাইভারদের সিস্টেমে কোনো লগইন একাউন্টের প্রয়োজন নেই। এখানে শুধুমাত্র তাদের নাম যুক্ত থাকে, যা ট্রিপ শিডিউল তৈরি, ট্রিপ লগ এবং ফিরতি ট্রিপ বরাদ্দ করার সময় ড্রপডাউনে পাওয়া যায়।
+              ড্রাইভারদের কোনো লগইন বা রোল নেই। নাম ও মোবাইল (ঐচ্ছিক) সংরক্ষিত থাকে। আপ ও ডাউন ট্রিপ সমন্বয় হওয়ার পর তাদের মোট পূর্ণাঙ্গ ট্রিপ সংখ্যা স্বয়ংক্রিয়ভাবে এডজাস্ট হয় এবং সর্বোচ্চ ট্রিপের ভিত্তিতে র্যাঙ্কিং প্রদর্শন করে।
             </p>
           </div>
 
-          <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
+          <div className="bg-white rounded-xl border border-slate-300 shadow-xs overflow-hidden">
             <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse text-xs">
+              <table className="w-full text-left border-collapse border border-slate-300 text-xs">
                 <thead>
-                  <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold uppercase tracking-wider text-[11px]">
-                    <th className="py-3 px-4">ক্রমিক</th>
-                    <th className="py-3 px-4">ড্রাইভারের নাম</th>
-                    <th className="py-3 px-4">যোগদানের তারিখ</th>
-                    <th className="py-3 px-4">ব্যবহারের ক্ষেত্র</th>
-                    <th className="py-3 px-4 text-center">স্ট্যাটাস</th>
-                    {isMasterAdmin && <th className="py-3 px-4 text-right">একশন</th>}
+                  <tr className="bg-slate-100 border-b border-slate-300 text-slate-700 font-bold uppercase text-[11px]">
+                    <th className="py-2.5 px-3 border-r border-slate-300 text-center w-20">র্যাঙ্কিং</th>
+                    <th className="py-2.5 px-3 border-r border-slate-300">ড্রাইভারের নাম</th>
+                    <th className="py-2.5 px-3 border-r border-slate-300">মোবাইল (ঐচ্ছিক)</th>
+                    <th className="py-2.5 px-3 border-r border-slate-300 text-center bg-indigo-50/60 font-black text-indigo-900">
+                      মোট পূর্ণাঙ্গ ট্রিপ (সমন্বয়কৃত)
+                    </th>
+                    <th className="py-2.5 px-3 border-r border-slate-300">তালিকাভুক্তির তারিখ</th>
+                    <th className="py-2.5 px-3 border-r border-slate-300 text-center w-24">স্ট্যাটাস</th>
+                    {isMasterAdmin && <th className="py-2.5 px-3 text-right w-24">একশন</th>}
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100 font-medium">
+                <tbody className="divide-y divide-slate-200 font-medium">
                   {filteredDrivers.length === 0 ? (
                     <tr>
-                      <td colSpan={6} className="py-8 text-center text-slate-400">
-                        কোনো ড্রাইভার যুক্ত করা নেই। "+ নতুন ড্রাইভার যোগ করুন" বাটনে ক্লিক করে নাম যুক্ত করুন।
+                      <td colSpan={7} className="py-8 text-center text-slate-400 border border-slate-300">
+                        কোনো ড্রাইভার পাওয়া যায়নি। "+ নতুন ড্রাইভার যোগ করুন" বাটনে ক্লিক করে নাম যুক্ত করুন।
                       </td>
                     </tr>
                   ) : (
                     filteredDrivers.map((d, idx) => (
                       <tr key={d.id} className="hover:bg-slate-50 transition-colors">
-                        <td className="py-3 px-4 font-mono font-bold text-slate-500">
-                          {toBengaliDigits(idx + 1)}
+                        <td className="py-2.5 px-3 border-r border-slate-200 text-center">
+                          <span
+                            className={`inline-flex items-center justify-center w-7 h-7 rounded-md font-black text-xs ${
+                              idx === 0
+                                ? 'bg-amber-100 text-amber-900 border border-amber-300'
+                                : idx === 1
+                                ? 'bg-slate-200 text-slate-800 border border-slate-300'
+                                : idx === 2
+                                ? 'bg-amber-50 text-amber-800 border border-amber-200'
+                                : 'bg-slate-100 text-slate-600'
+                            }`}
+                          >
+                            #{toBengaliDigits(d.rank || idx + 1)}
+                          </span>
                         </td>
-                        <td className="py-3 px-4">
-                          <div className="font-bold text-slate-900 flex items-center gap-2">
-                            <div className="w-7 h-7 rounded-lg bg-indigo-50 text-indigo-700 flex items-center justify-center font-bold text-xs">
-                              {d.name.slice(0, 1)}
+                        <td className="py-2.5 px-3 border-r border-slate-200">
+                          <div className="font-bold text-slate-900">{d.name}</div>
+                        </td>
+                        <td className="py-2.5 px-3 border-r border-slate-200 font-mono text-slate-700">
+                          {d.phone ? (
+                            <div className="flex items-center gap-1">
+                              <Phone className="w-3 h-3 text-slate-400" />
+                              <span>{d.phone}</span>
                             </div>
-                            <span>{d.name}</span>
-                          </div>
+                          ) : (
+                            <span className="text-slate-400 italic">প্রযোজ্য নয়</span>
+                          )}
                         </td>
-                        <td className="py-3 px-4 text-slate-600 font-mono text-[11px]">
+                        <td className="py-2.5 px-3 border-r border-slate-200 text-center bg-indigo-50/20 font-bold">
+                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black bg-indigo-100 text-indigo-900 border border-indigo-200">
+                            {toBengaliDigits(d.totalTrips || 0)} টি ট্রিপ
+                          </span>
+                        </td>
+                        <td className="py-2.5 px-3 border-r border-slate-200 text-slate-600 font-mono text-[11px]">
                           {formatBengaliDateTime(d.createdAt)}
                         </td>
-                        <td className="py-3 px-4 text-slate-600">
-                          শিডিউল মেকার, ট্রিপ লগ ও ফিরতি ট্রিপ
-                        </td>
-                        <td className="py-3 px-4 text-center">
-                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">
+                        <td className="py-2.5 px-3 border-r border-slate-200 text-center">
+                          <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">
                             সক্রিয়
                           </span>
                         </td>
                         {isMasterAdmin && (
-                          <td className="py-3 px-4 text-right">
+                          <td className="py-2.5 px-3 text-right">
                             <div className="flex items-center justify-end gap-1.5">
                               <button
                                 type="button"
                                 onClick={() => openEditDriverModal(d)}
-                                className="p-1.5 text-blue-600 hover:bg-blue-50 rounded-xl transition-colors font-semibold"
+                                className="p-1.5 text-blue-600 hover:bg-blue-100 rounded-lg transition-colors font-semibold"
                                 title="সম্পাদনা"
                               >
                                 <Edit className="w-3.5 h-3.5" />
@@ -718,7 +775,7 @@ export const UsersPage: React.FC = () => {
                               <button
                                 type="button"
                                 onClick={() => handleDeleteDriver(d)}
-                                className="p-1.5 text-red-600 hover:bg-red-50 rounded-xl transition-colors font-semibold"
+                                className="p-1.5 text-red-600 hover:bg-red-100 rounded-lg transition-colors font-semibold"
                                 title="মুছে ফেলুন"
                               >
                                 <Trash2 className="w-3.5 h-3.5" />
@@ -914,15 +971,28 @@ export const UsersPage: React.FC = () => {
                 />
               </div>
 
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  মোবাইল নম্বর (ঐচ্ছিক)
+                </label>
+                <input
+                  type="tel"
+                  value={supPhone ?? ''}
+                  onChange={(e) => setSupPhone(e.target.value)}
+                  placeholder="যেমন: 017xxxxxxxx (ঐচ্ছিক)"
+                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-xs font-mono focus:bg-white focus:ring-2 focus:ring-blue-500 outline-none"
+                />
+              </div>
+
               <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-[11px] text-slate-600 leading-relaxed">
-                💡 <strong>দ্রষ্টব্য:</strong> সুপারভাইজারের কোনো মোবাইল নম্বর বা লগইন পাসওয়ার্ড প্রয়োজন নেই। এটি কেবল নাম হিসেবে তালিকায় সংরক্ষিত থাকবে এবং শিডিউল তৈরির ড্রপডাউনে পাওয়া যাবে।
+                💡 <strong>দ্রষ্টব্য:</strong> সুপারভাইজারের কোনো রোল বা লগইন পাসওয়ার্ড নেই। নাম ও মোবাইল (ঐচ্ছিক) সংরক্ষণ হয় এবং ট্রিপ সমন্বয়ের ভিত্তিতে মোট ট্রিপ ও রেংকিং প্রদর্শিত হয়।
               </div>
 
               <button
                 type="submit"
                 className="w-full py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold shadow-md transition-all cursor-pointer"
               >
-                {editingSup ? 'সুপারভাইজার নাম আপডেট করুন' : 'তালিকায় যোগ করুন'}
+                {editingSup ? 'সুপারভাইজার তথ্য আপডেট করুন' : 'তালিকায় যোগ করুন'}
               </button>
             </form>
           </div>
@@ -968,15 +1038,28 @@ export const UsersPage: React.FC = () => {
                 />
               </div>
 
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  মোবাইল নম্বর (ঐচ্ছিক)
+                </label>
+                <input
+                  type="tel"
+                  value={driverPhone ?? ''}
+                  onChange={(e) => setDriverPhone(e.target.value)}
+                  placeholder="যেমন: 018xxxxxxxx (ঐচ্ছিক)"
+                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-xs font-mono focus:bg-white focus:ring-2 focus:ring-indigo-500 outline-none"
+                />
+              </div>
+
               <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-[11px] text-slate-600 leading-relaxed">
-                💡 <strong>দ্রষ্টব্য:</strong> ড্রাইভারের কোনো মোবাইল নম্বর বা লগইন অ্যাকাউন্টের প্রয়োজন নেই। এটি শুধু নাম হিসেবে সংরক্ষিত থাকবে এবং শিডিউল মেকার ও ফিরতি ট্রিপ ড্রপডাউনে সিলেক্ট করা যাবে।
+                💡 <strong>দ্রষ্টব্য:</strong> ড্রাইভারের কোনো রোল বা লগইন পাসওয়ার্ড নেই। নাম ও মোবাইল (ঐচ্ছিক) সংরক্ষণ হয় এবং ট্রিপ সমন্বয়ের ভিত্তিতে মোট ট্রিপ ও রেংকিং প্রদর্শিত হয়।
               </div>
 
               <button
                 type="submit"
                 className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold shadow-md transition-all cursor-pointer"
               >
-                {editingDriver ? 'ড্রাইভারের নাম আপডেট করুন' : 'তালিকায় যোগ করুন'}
+                {editingDriver ? 'ড্রাইভার তথ্য আপডেট করুন' : 'তালিকায় যোগ করুন'}
               </button>
             </form>
           </div>

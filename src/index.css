@@ -3,27 +3,36 @@
 @layer utilities {
   @media print {
     body {
-      background: white !important;
-      color: black !important;
+      background: #ffffff !important;
+      color: #000000 !important;
       margin: 0 !important;
       padding: 0 !important;
     }
 
-    /* Hide all outer page elements */
+    /* Hide all outer UI elements */
     aside, header, nav, button, .print\:hidden {
       display: none !important;
     }
 
-    #printable-thermal-ticket {
-      position: absolute !important;
-      left: 0 !important;
-      top: 0 !important;
-      width: 58mm !important;
-      max-width: 58mm !important;
+    /* Modal resets for clean printing */
+    .fixed, .backdrop-blur-xs {
+      position: static !important;
+      background: transparent !important;
+      backdrop-filter: none !important;
+      padding: 0 !important;
       margin: 0 !important;
-      padding: 2mm !important;
-      background: white !important;
-      color: black !important;
+      box-shadow: none !important;
+      border: none !important;
+    }
+
+    #printable-thermal-ticket {
+      position: relative !important;
+      width: 100% !important;
+      max-width: 74mm !important;
+      margin: 0 auto !important;
+      padding: 2px !important;
+      background: #ffffff !important;
+      color: #000000 !important;
       box-shadow: none !important;
     }
 
@@ -31,26 +40,33 @@
     #printable-supervisor-waybill,
     #printable-trip-report,
     #printable-database-report {
-      position: absolute !important;
-      left: 0 !important;
-      top: 0 !important;
+      position: relative !important;
       width: 100% !important;
       margin: 0 !important;
-      padding: 5mm !important;
-      background: white !important;
-      color: black !important;
+      padding: 4mm !important;
+      background: #ffffff !important;
+      color: #000000 !important;
       box-shadow: none !important;
       display: block !important;
     }
 
     .receipt-content {
       width: 100% !important;
-      max-width: 54mm !important;
-      border: 1px dashed black !important;
-      padding: 2mm !important;
+      max-width: 74mm !important;
+      margin: 0 auto !important;
+      background: #ffffff !important;
+      color: #000000 !important;
+      border: 1.5px solid #000000 !important;
+      padding: 6px 8px !important;
       box-shadow: none !important;
-      font-size: 9.5px !important;
+      font-size: 10px !important;
       page-break-inside: avoid !important;
+      break-inside: avoid !important;
+    }
+
+    .tear-divider {
+      page-break-before: avoid !important;
+      break-before: avoid !important;
     }
   }
 }
