@@ -42,6 +42,53 @@ export function isNextDay(date1: string, date2: string): boolean {
   }
 }
 
+function getBookingBreakdown(b: { seatFare?: number; cargoFare?: number; totalFare?: number }) {
+  const cargoFare = Math.max(0, Number(b.cargoFare) || 0);
+  const total = Math.max(0, Number(b.totalFare) || 0);
+  const seatFare =
+    b.seatFare !== undefined && b.seatFare !== null && !isNaN(Number(b.seatFare))
+      ? Math.max(0, Number(b.seatFare))
+      : Math.max(0, total - cargoFare);
+  return {
+    seatFare,
+    cargoFare,
+    totalFare: seatFare + cargoFare,
+  };
+}
+
+function getScheduleCollectionBreakdown(
+  s: Schedule | undefined,
+  activeBookings: Array<{ scheduleId: string; seatFare?: number; cargoFare?: number; totalFare?: number }>
+) {
+  if (!s) return { seatCollection: 0, cargoCollection: 0, totalCollection: 0 };
+  const sBookings = activeBookings.filter((b) => b.scheduleId === s.id);
+  if (sBookings.length > 0) {
+    let seatCollection = 0;
+    let cargoCollection = 0;
+    for (const b of sBookings) {
+      const parts = getBookingBreakdown(b);
+      seatCollection += parts.seatFare;
+      cargoCollection += parts.cargoFare;
+    }
+    return {
+      seatCollection,
+      cargoCollection,
+      totalCollection: seatCollection + cargoCollection,
+    };
+  }
+  const cargoCollection = Math.max(0, Number(s.totalCargoCollection) || 0);
+  const totalCollection = Math.max(0, Number(s.totalCollection) || 0);
+  const seatCollection =
+    s.totalSeatCollection !== undefined && s.totalSeatCollection !== null
+      ? Math.max(0, Number(s.totalSeatCollection))
+      : Math.max(0, totalCollection - cargoCollection);
+  return {
+    seatCollection,
+    cargoCollection,
+    totalCollection: seatCollection + cargoCollection,
+  };
+}
+
 // ==========================================
 // 1. AUTHENTICATION ROUTES
 // ==========================================
@@ -1026,7 +1073,7 @@ apiRouter.post(
       return res.status(403).json({ error: 'শুধুমাত্র এডমিন, মডারেটর এবং মাষ্টার বুকিং কাউন্টার রুট তৈরি করতে পারে।' });
     }
 
-    const { name, origin, destination, intermediateStops, baseFare, distanceKm, direction } = req.body;
+    const { routeNumber, name, origin, destination, intermediateStops, baseFare, distanceKm, direction } = req.body;
     if (!origin || !destination) {
       return res.status(400).json({ error: 'রুটের শুরু ও গন্তব্য আবশ্যক।' });
     }
@@ -1034,10 +1081,15 @@ apiRouter.post(
     const companyId = resolveTargetCompanyId(req, req.body.companyId);
     const routeName = name?.trim() || `${origin.trim()} - ${destination.trim()}`;
     const cleanDirection: 'UP' | 'DOWN' = direction === 'DOWN' ? 'DOWN' : 'UP';
+    const parsedRouteNumber =
+      routeNumber !== undefined && routeNumber !== null && String(routeNumber).trim() !== '' && Number(routeNumber) > 0
+        ? Number(routeNumber)
+        : undefined;
 
     const newRoute: RouteItem = {
       id: `rt-${Date.now()}`,
       companyId,
+      routeNumber: parsedRouteNumber,
       name: routeName,
       origin: origin.trim(),
       destination: destination.trim(),
@@ -1173,6 +1225,11 @@ apiRouter.get('/schedules', authMiddleware, (req: AuthenticatedRequest, res) => 
   for (const v of db.getVehicles(companyId)) {
     vehicleMap.set(v.id, v);
   }
+  const routeMap = new Map<string, RouteItem>();
+  for (const r of db.getRoutes(companyId)) {
+    routeMap.set(r.id, r);
+  }
+  const activeBookings = db.getBookings(companyId).filter((b) => b.status === 'booked');
 
   // Group by date + vehicleId to calculate trip sequence if multiple trips
   // CRITICAL REQUIREMENT: ১ম/২য় ট্রিপ লজিক শুধু আপ ট্রিপে! ডাউন ট্রিপে কোনো গাড়ি ১ম/২য় হবে না।
@@ -1218,13 +1275,25 @@ apiRouter.get('/schedules', authMiddleware, (req: AuthenticatedRequest, res) => 
     });
   }
 
+  const enrichedSchedules = schedules.map((s) => {
+    const linkedRoute = routeMap.get(s.routeId);
+    const col = getScheduleCollectionBreakdown(s, activeBookings);
+    return {
+      ...s,
+      routeNumber: s.routeNumber ?? linkedRoute?.routeNumber,
+      totalSeatCollection: col.seatCollection,
+      totalCargoCollection: col.cargoCollection,
+      totalCollection: col.totalCollection,
+    };
+  });
+
   // Sort by date desc, then departure time asc
-  schedules.sort((a, b) => {
+  enrichedSchedules.sort((a, b) => {
     if (a.date !== b.date) return b.date.localeCompare(a.date);
     return a.departureTime.localeCompare(b.departureTime);
   });
 
-  res.json({ schedules });
+  res.json({ schedules: enrichedSchedules });
 });
 
 apiRouter.get('/schedules/:id', authMiddleware, (req, res) => {
@@ -1380,6 +1449,7 @@ apiRouter.post(
       tripSequenceLabel,
       seatCapacity: vehicle.seatCapacity,
       routeId: route.id,
+      routeNumber: route.routeNumber,
       routeName: route.name,
       supervisor: supervisor.trim(),
       supervisorPhone: supervisorPhone?.trim() || '',
@@ -1392,6 +1462,8 @@ apiRouter.post(
       reconciled: false,
       returnTripCreated: direction === 'DOWN' ? true : false,
       totalBookedSeats: 0,
+      totalSeatCollection: 0,
+      totalCargoCollection: 0,
       totalCollection: 0,
       linkedTripId: parentTrip ? parentTrip.id : (linkedTripId || undefined),
       roundTripPairTripNo: parentTrip ? parentTrip.tripNo : undefined,
@@ -1421,6 +1493,154 @@ apiRouter.post(
     });
 
     res.json({ success: true, schedule: newSchedule });
+  }
+);
+
+// Forward UP Schedules from a source date (e.g. yesterday) to a target date (e.g. today or selected date)
+apiRouter.post(
+  '/schedules/forward-up',
+  authMiddleware,
+  (req: AuthenticatedRequest, res) => {
+    if (!canManageSchedules(req.user)) {
+      return res.status(403).json({
+        error: 'শুধুমাত্র এডমিন, মডারেটর এবং মাষ্টার বুকিং কাউন্টার শিডিউল ফরোয়ার্ড করতে পারে।',
+      });
+    }
+
+    const { sourceDate, targetDate, scheduleIds } = req.body;
+    if (!sourceDate || !targetDate) {
+      return res.status(400).json({ error: 'পূর্ববর্তী তারিখ এবং নতুন লক্ষ্য তারিখ উভয়ই আবশ্যক।' });
+    }
+
+    const targetCompanyId = resolveTargetCompanyId(req, req.body.companyId);
+    const allCompanySchedules = db.getSchedules(targetCompanyId);
+    const routeMap = new Map(db.getRoutes(targetCompanyId).map((r) => [r.id, r]));
+
+    let sourceUpTrips = allCompanySchedules.filter(
+      (s) => s.date === sourceDate && s.direction === 'UP' && s.status !== 'cancelled'
+    );
+
+    if (Array.isArray(scheduleIds) && scheduleIds.length > 0) {
+      const allowedSet = new Set(scheduleIds);
+      sourceUpTrips = sourceUpTrips.filter((s) => allowedSet.has(s.id));
+    }
+
+    if (sourceUpTrips.length === 0) {
+      return res.status(400).json({
+        error: `${sourceDate} তারিখে ফরোয়ার্ড করার মতো কোনো আপ ট্রিপ পাওয়া যায়নি।`,
+      });
+    }
+
+    sourceUpTrips.sort((a, b) => {
+      const rNumA = a.routeNumber ?? routeMap.get(a.routeId)?.routeNumber ?? Number.MAX_SAFE_INTEGER;
+      const rNumB = b.routeNumber ?? routeMap.get(b.routeId)?.routeNumber ?? Number.MAX_SAFE_INTEGER;
+      if (rNumA !== rNumB) return rNumA - rNumB;
+      return a.departureTime.localeCompare(b.departureTime);
+    });
+
+    const existingOnTarget = allCompanySchedules.filter(
+      (s) => s.date === targetDate && s.status !== 'cancelled'
+    );
+    const createdSchedules: Schedule[] = [];
+    let skippedCount = 0;
+    const baseTripCount = allCompanySchedules.length;
+
+    for (const src of sourceUpTrips) {
+      const isDuplicate =
+        existingOnTarget.some(
+          (s) => s.vehicleId === src.vehicleId && s.departureTime === src.departureTime
+        ) ||
+        createdSchedules.some(
+          (s) => s.vehicleId === src.vehicleId && s.departureTime === src.departureTime
+        );
+
+      if (isDuplicate) {
+        skippedCount++;
+        continue;
+      }
+
+      const upCountForVeh =
+        existingOnTarget.filter((s) => s.vehicleId === src.vehicleId && s.direction === 'UP').length +
+        createdSchedules.filter((s) => s.vehicleId === src.vehicleId && s.direction === 'UP').length;
+      const tripSequence = upCountForVeh + 1;
+      const tripSequenceLabel =
+        tripSequence === 2
+          ? '২য় ট্রিপ'
+          : tripSequence === 3
+          ? '৩য় ট্রিপ'
+          : tripSequence === 4
+          ? '৪র্থ ট্রিপ'
+          : tripSequence > 4
+          ? `${toBnDigits(tripSequence)}তম ট্রিপ`
+          : undefined;
+
+      let nightHoldNextDate: string | undefined = undefined;
+      if (src.isNightHold) {
+        const d = new Date(targetDate);
+        d.setDate(d.getDate() + 1);
+        nightHoldNextDate = d.toISOString().split('T')[0];
+      }
+
+      const tripNo = `TR-UP-${String(baseTripCount + createdSchedules.length + 1).padStart(3, '0')}`;
+      const linkedRoute = routeMap.get(src.routeId);
+      const nowIso = new Date().toISOString();
+
+      const cloned: Schedule = {
+        id: `sch-${Date.now()}-${createdSchedules.length}-${Math.floor(Math.random() * 100)}`,
+        companyId: targetCompanyId,
+        tripNo,
+        date: targetDate,
+        departureTime: src.departureTime,
+        vehicleId: src.vehicleId,
+        vehicleRegNo: src.vehicleRegNo,
+        vehicleOwnerName: src.vehicleOwnerName || '',
+        tripSequenceOnDay: tripSequence,
+        tripSequenceLabel,
+        seatCapacity: src.seatCapacity,
+        routeId: src.routeId,
+        routeNumber: src.routeNumber ?? linkedRoute?.routeNumber,
+        routeName: src.routeName,
+        supervisor: src.supervisor,
+        supervisorPhone: src.supervisorPhone || '',
+        driver: src.driver || '',
+        direction: 'UP',
+        fare: src.fare,
+        isNightHold: Boolean(src.isNightHold),
+        nightHoldNextDate,
+        status: 'scheduled',
+        reconciled: false,
+        returnTripCreated: false,
+        totalBookedSeats: 0,
+        totalSeatCollection: 0,
+        totalCargoCollection: 0,
+        totalCollection: 0,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      };
+
+      db.getSchedules().push(cloned);
+      createdSchedules.push(cloned);
+    }
+
+    if (createdSchedules.length > 0) {
+      db.save();
+      db.logAudit({
+        userId: req.user!.id,
+        userName: req.user!.name,
+        role: req.user!.role,
+        actionType: 'FORWARD_UP_SCHEDULES',
+        entityType: 'SCHEDULE',
+        entityId: `fwd-${targetDate}`,
+        details: `${sourceDate} তারিখ থেকে ${createdSchedules.length}টি আপ ট্রিপ ${targetDate} তারিখে ফরোয়ার্ড করা হয়েছে (${skippedCount}টি ডুপ্লিকেট বাদ)।`,
+      });
+    }
+
+    res.json({
+      success: true,
+      createdSchedules,
+      createdCount: createdSchedules.length,
+      skippedCount,
+    });
   }
 );
 
@@ -1549,6 +1769,7 @@ apiRouter.put(
       if (rt) {
         changes.push(`রুট: ${schedule.routeName} ➜ ${rt.name}`);
         schedule.routeId = rt.id;
+        schedule.routeNumber = rt.routeNumber;
         schedule.routeName = rt.name;
       }
     }
@@ -1637,13 +1858,21 @@ apiRouter.post('/bookings', authMiddleware, (req: AuthenticatedRequest, res) => 
     boardingPoint,
     destination,
     seatNumbers,
+    seatFare,
+    cargoFare,
     totalFare,
     manualFare,
     farePerSeat,
   } = req.body;
 
-  if (!scheduleId || !seatNumbers || !Array.isArray(seatNumbers) || seatNumbers.length === 0) {
-    return res.status(400).json({ error: 'শিডিউল এবং কমপক্ষে একটি সিট নির্বাচন করুন।' });
+  const cleanSeats = Array.isArray(seatNumbers) ? seatNumbers : [];
+  const parsedCargoFare =
+    cargoFare !== undefined && cargoFare !== '' && cargoFare !== null
+      ? Math.max(0, Number(cargoFare) || 0)
+      : 0;
+
+  if (!scheduleId || (cleanSeats.length === 0 && parsedCargoFare <= 0)) {
+    return res.status(400).json({ error: 'শিডিউল এবং কমপক্ষে একটি সিট অথবা মালের ভাড়া প্রদান করুন।' });
   }
 
   // Determine effective counter
@@ -1657,16 +1886,21 @@ apiRouter.post('/bookings', authMiddleware, (req: AuthenticatedRequest, res) => 
     return res.status(400).json({ error: 'বুকিংয়ের জন্য কাউন্টার নির্বাচন করুন।' });
   }
 
-  // Parse manual fare if provided
+  let parsedSeatFare: number | undefined = undefined;
+  if (seatFare !== undefined && seatFare !== '' && seatFare !== null && !isNaN(Number(seatFare))) {
+    parsedSeatFare = Math.max(0, Number(seatFare));
+  } else if (manualFare !== undefined && manualFare !== '' && manualFare !== null && !isNaN(Number(manualFare))) {
+    parsedSeatFare = Math.max(0, Number(manualFare));
+  }
+
+  // Parse manual total fare if provided
   let customTotalFare: number | undefined = undefined;
-  if (manualFare !== undefined && manualFare !== '' && manualFare !== null) {
-    customTotalFare = Math.max(0, Number(manualFare));
-  } else if (totalFare !== undefined && totalFare !== '' && totalFare !== null) {
+  if (totalFare !== undefined && totalFare !== '' && totalFare !== null && !isNaN(Number(totalFare))) {
     customTotalFare = Math.max(0, Number(totalFare));
   }
 
   let customFarePerSeat: number | undefined = undefined;
-  if (farePerSeat !== undefined && farePerSeat !== '' && farePerSeat !== null) {
+  if (farePerSeat !== undefined && farePerSeat !== '' && farePerSeat !== null && !isNaN(Number(farePerSeat))) {
     customFarePerSeat = Math.max(0, Number(farePerSeat));
   }
 
@@ -1680,14 +1914,16 @@ apiRouter.post('/bookings', authMiddleware, (req: AuthenticatedRequest, res) => 
       passengerPhone: passengerPhone?.trim() || '',
       boardingPoint: boardingPoint?.trim() || '',
       destination: destination?.trim() || '',
-      seatNumbers,
+      seatNumbers: cleanSeats,
+      seatFare: parsedSeatFare,
+      cargoFare: parsedCargoFare,
       customTotalFare,
       customFarePerSeat,
     });
 
     res.json({
       success: true,
-      message: 'সিট সফলভাবে বুকিং হয়েছে!',
+      message: cleanSeats.length > 0 ? 'সিট সফলভাবে বুকিং হয়েছে!' : 'মালের ভাড়া সফলভাবে বুকিং হয়েছে!',
       booking: result.booking,
       schedule: result.schedule,
     });
@@ -1763,6 +1999,7 @@ apiRouter.get('/reconciliations/candidates', authMiddleware, (req: Authenticated
   const targetDate = (date as string) || new Date().toISOString().split('T')[0];
 
   const allSchedules = db.getSchedules(companyId).filter((s) => s.status !== 'cancelled');
+  const activeBookings = db.getBookings(companyId).filter((b) => b.status === 'booked');
   const vehicles = db.getVehicles(companyId);
 
   // Trips on target date
@@ -1782,8 +2019,14 @@ apiRouter.get('/reconciliations/candidates', authMiddleware, (req: Authenticated
     driver?: string;
     upTrip?: Schedule;
     downTrip?: Schedule;
+    upSeatCollection: number;
+    upCargoCollection: number;
     upCollection: number;
+    downSeatCollection: number;
+    downCargoCollection: number;
     downCollection: number;
+    totalSeatCollection: number;
+    totalCargoCollection: number;
     combinedCollection: number;
     isNightHoldMatch: boolean;
     reconciliationStatus: 'reconciled' | 'ready' | 'incomplete';
@@ -1808,9 +2051,17 @@ apiRouter.get('/reconciliations/candidates', authMiddleware, (req: Authenticated
     const downTrip = downTrips[0];
 
     if (upTrip || downTrip) {
-      const upCollection = upTrip?.totalCollection || 0;
-      const downCollection = downTrip?.totalCollection || 0;
-      const combinedCollection = upCollection + downCollection;
+      const upPartsCol = getScheduleCollectionBreakdown(upTrip, activeBookings);
+      const downPartsCol = getScheduleCollectionBreakdown(downTrip, activeBookings);
+      const upSeatCollection = upPartsCol.seatCollection;
+      const upCargoCollection = upPartsCol.cargoCollection;
+      const upCollection = upPartsCol.totalCollection;
+      const downSeatCollection = downPartsCol.seatCollection;
+      const downCargoCollection = downPartsCol.cargoCollection;
+      const downCollection = downPartsCol.totalCollection;
+      const totalSeatCollection = upSeatCollection + downSeatCollection;
+      const totalCargoCollection = upCargoCollection + downCargoCollection;
+      const combinedCollection = totalSeatCollection + totalCargoCollection;
 
       const existing = existingReconciliations.find((r) => r.vehicleId === veh.id);
 
@@ -1856,8 +2107,14 @@ apiRouter.get('/reconciliations/candidates', authMiddleware, (req: Authenticated
         driver: upTrip?.driver || downTrip?.driver || veh.ownerName || 'আল আমিন',
         upTrip,
         downTrip,
+        upSeatCollection,
+        upCargoCollection,
         upCollection,
+        downSeatCollection,
+        downCargoCollection,
         downCollection,
+        totalSeatCollection,
+        totalCargoCollection,
         combinedCollection,
         isNightHoldMatch: Boolean(upTrip && upTrip.date !== targetDate),
         reconciliationStatus: status,
@@ -1890,10 +2147,19 @@ apiRouter.post(
 
     const upTrip = upTripId ? db.getSchedules(companyId).find((s) => s.id === upTripId) || db.getSchedules().find((s) => s.id === upTripId) : undefined;
     const downTrip = downTripId ? db.getSchedules(companyId).find((s) => s.id === downTripId) || db.getSchedules().find((s) => s.id === downTripId) : undefined;
+    const activeBookings = db.getBookings(companyId).filter((b) => b.status === 'booked');
 
-    const upCollection = upTrip?.totalCollection || 0;
-    const downCollection = downTrip?.totalCollection || 0;
-    const combinedCollection = upCollection + downCollection;
+    const upCol = getScheduleCollectionBreakdown(upTrip, activeBookings);
+    const downCol = getScheduleCollectionBreakdown(downTrip, activeBookings);
+    const upSeatCollection = upCol.seatCollection;
+    const upCargoCollection = upCol.cargoCollection;
+    const upCollection = upCol.totalCollection;
+    const downSeatCollection = downCol.seatCollection;
+    const downCargoCollection = downCol.cargoCollection;
+    const downCollection = downCol.totalCollection;
+    const totalSeatCollection = upSeatCollection + downSeatCollection;
+    const totalCargoCollection = upCargoCollection + downCargoCollection;
+    const combinedCollection = totalSeatCollection + totalCargoCollection;
 
     const count = db.getReconciliations(companyId).length + 1;
     const reconNo = `REC-${operationalDate.replace(/-/g, '')}-${String(count).padStart(3, '0')}`;
@@ -1926,8 +2192,14 @@ apiRouter.post(
       upTripNo: upTrip?.tripNo,
       downTripId: downTrip?.id,
       downTripNo: downTrip?.tripNo,
+      upSeatCollection,
+      upCargoCollection,
       upCollection,
+      downSeatCollection,
+      downCargoCollection,
       downCollection,
+      totalSeatCollection,
+      totalCargoCollection,
       combinedCollection,
       status: 'completed',
       isNightHoldMatch: Boolean(upTrip && upTrip.date !== operationalDate),
@@ -1979,6 +2251,7 @@ apiRouter.post(
 
     const companyId = getRequestCompanyId(req) || req.body.companyId;
     const allSchedules = db.getSchedules(companyId).filter((s) => s.status !== 'cancelled');
+    const activeBookings = db.getBookings(companyId).filter((b) => b.status === 'booked');
     const vehicles = db.getVehicles(companyId);
     const tripsOnDate = allSchedules.filter((s) => s.date === operationalDate);
     const existingReconciliations = db.getReconciliations(companyId).filter((r) => r.operationalDate === operationalDate);
@@ -2004,9 +2277,17 @@ apiRouter.post(
 
       // Reconcile if both UP and DOWN trips exist
       if (upTrip && downTrip) {
-        const upCollection = upTrip.totalCollection || 0;
-        const downCollection = downTrip.totalCollection || 0;
-        const combinedCollection = upCollection + downCollection;
+        const upCol = getScheduleCollectionBreakdown(upTrip, activeBookings);
+        const downCol = getScheduleCollectionBreakdown(downTrip, activeBookings);
+        const upSeatCollection = upCol.seatCollection;
+        const upCargoCollection = upCol.cargoCollection;
+        const upCollection = upCol.totalCollection;
+        const downSeatCollection = downCol.seatCollection;
+        const downCargoCollection = downCol.cargoCollection;
+        const downCollection = downCol.totalCollection;
+        const totalSeatCollection = upSeatCollection + downSeatCollection;
+        const totalCargoCollection = upCargoCollection + downCargoCollection;
+        const combinedCollection = totalSeatCollection + totalCargoCollection;
 
         const count = db.getReconciliations(companyId).length + 1;
         const reconNo = `REC-${operationalDate.replace(/-/g, '')}-${String(count).padStart(3, '0')}`;
@@ -2033,8 +2314,14 @@ apiRouter.post(
           upTripNo: upTrip.tripNo,
           downTripId: downTrip.id,
           downTripNo: downTrip.tripNo,
+          upSeatCollection,
+          upCargoCollection,
           upCollection,
+          downSeatCollection,
+          downCargoCollection,
           downCollection,
+          totalSeatCollection,
+          totalCargoCollection,
           combinedCollection,
           status: 'completed',
           isNightHoldMatch: Boolean(upTrip.date !== operationalDate),
@@ -2119,7 +2406,14 @@ apiRouter.get('/analytics/summary', authMiddleware, (req: AuthenticatedRequest, 
   const seatsSold = allBookings.reduce((sum, b) => sum + b.totalSeats, 0);
   const ticketSales = allBookings.length;
   const activeTrips = schedules.length;
-  const totalCollections = allBookings.reduce((sum, b) => sum + b.totalFare, 0);
+  let totalSeatCollections = 0;
+  let totalCargoCollections = 0;
+  for (const b of allBookings) {
+    const parts = getBookingBreakdown(b);
+    totalSeatCollections += parts.seatFare;
+    totalCargoCollections += parts.cargoFare;
+  }
+  const totalCollections = totalSeatCollections + totalCargoCollections;
 
   // Unreconciled count
   const unreconciledTrips = schedules.filter((s) => !s.reconciled).length;
@@ -2127,16 +2421,23 @@ apiRouter.get('/analytics/summary', authMiddleware, (req: AuthenticatedRequest, 
   // Vehicle-wise collection
   const vehicleWiseCollections = vehicles.map((veh) => {
     const vehSchedules = schedules.filter((s) => s.vehicleId === veh.id);
-    const upCollection = vehSchedules
-      .filter((s) => s.direction === 'UP')
-      .reduce((sum, s) => sum + s.totalCollection, 0);
-    const downCollection = vehSchedules
-      .filter((s) => s.direction === 'DOWN')
-      .reduce((sum, s) => sum + s.totalCollection, 0);
+    let upCollection = 0;
+    let downCollection = 0;
+    let seatCollection = 0;
+    let cargoCollection = 0;
+    for (const s of vehSchedules) {
+      const col = getScheduleCollectionBreakdown(s, allBookings);
+      if (s.direction === 'UP') upCollection += col.totalCollection;
+      if (s.direction === 'DOWN') downCollection += col.totalCollection;
+      seatCollection += col.seatCollection;
+      cargoCollection += col.cargoCollection;
+    }
     return {
       regNo: veh.regNo,
       upCollection,
       downCollection,
+      seatCollection,
+      cargoCollection,
       total: upCollection + downCollection,
     };
   });
@@ -2145,14 +2446,22 @@ apiRouter.get('/analytics/summary', authMiddleware, (req: AuthenticatedRequest, 
   const counterWiseSales = counters.map((cnt) => {
     const cntBookings = allBookings.filter((b) => b.counterId === cnt.id);
     const cntSeats = cntBookings.reduce((sum, b) => sum + b.totalSeats, 0);
-    const cntRevenue = cntBookings.reduce((sum, b) => sum + b.totalFare, 0);
+    let seatRevenue = 0;
+    let cargoRevenue = 0;
+    for (const b of cntBookings) {
+      const parts = getBookingBreakdown(b);
+      seatRevenue += parts.seatFare;
+      cargoRevenue += parts.cargoFare;
+    }
     return {
       counterId: cnt.id,
       counterName: cnt.name,
       counterCode: cnt.code,
       seatColor: cnt.seatColor,
       seatsSold: cntSeats,
-      totalRevenue: cntRevenue,
+      seatRevenue,
+      cargoRevenue,
+      totalRevenue: seatRevenue + cargoRevenue,
     };
   });
 
@@ -2162,6 +2471,8 @@ apiRouter.get('/analytics/summary', authMiddleware, (req: AuthenticatedRequest, 
     seatsSold,
     ticketSales,
     activeTrips,
+    totalSeatCollections,
+    totalCargoCollections,
     totalCollections,
     unreconciledTrips,
     vehicleWiseCollections,
@@ -2329,9 +2640,20 @@ apiRouter.get('/reports/trip-database', authMiddleware, (req: AuthenticatedReque
       ? tripBookings.reduce((sum, b) => sum + b.totalSeats, 0)
       : s.totalBookedSeats || 0;
 
-    const totalAmount = counterId
-      ? tripBookings.reduce((sum, b) => sum + b.totalFare, 0)
-      : s.totalCollection || 0;
+    let seatAmount = 0;
+    let cargoAmount = 0;
+    if (counterId) {
+      for (const b of tripBookings) {
+        const parts = getBookingBreakdown(b);
+        seatAmount += parts.seatFare;
+        cargoAmount += parts.cargoFare;
+      }
+    } else {
+      const col = getScheduleCollectionBreakdown(s, allBookings);
+      seatAmount = col.seatCollection;
+      cargoAmount = col.cargoCollection;
+    }
+    const totalAmount = seatAmount + cargoAmount;
 
     return {
       serial: daySerial,
@@ -2347,6 +2669,8 @@ apiRouter.get('/reports/trip-database', authMiddleware, (req: AuthenticatedReque
       supervisor: s.supervisor,
       supervisorPhone: s.supervisorPhone,
       bookedSeatsCount,
+      seatAmount,
+      cargoAmount,
       totalAmount,
       fare: s.fare,
       isNightHold: s.isNightHold,
@@ -2355,13 +2679,17 @@ apiRouter.get('/reports/trip-database', authMiddleware, (req: AuthenticatedReque
   });
 
   const totalSeats = records.reduce((sum, r) => sum + r.bookedSeatsCount, 0);
-  const totalAmount = records.reduce((sum, r) => sum + r.totalAmount, 0);
+  const totalSeatAmount = records.reduce((sum, r) => sum + r.seatAmount, 0);
+  const totalCargoAmount = records.reduce((sum, r) => sum + r.cargoAmount, 0);
+  const totalAmount = totalSeatAmount + totalCargoAmount;
 
   res.json({
     trips: records,
     summary: {
       totalTrips: records.length,
       totalSeats,
+      totalSeatAmount,
+      totalCargoAmount,
       totalAmount,
     },
   });

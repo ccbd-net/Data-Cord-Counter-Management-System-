@@ -231,12 +231,20 @@ export const VehiclesPage: React.FC = () => {
       `নির্বাচিত দিনে ট্রিপ সংখ্যা (${reportDate})`,
       `চলতি মাসে মোট ট্রিপ (${reportMonth})`,
       'চলতি মাসে সর্বমোট বিক্রিত আসন',
-      'চলতি মাসে মোট সংগৃহীত ভাড়া (৳)',
+      'সিট ভাড়া আদায় (৳)',
+      'মালের ভাড়া (৳)',
+      'সর্বমোট টাকা (সিট+মাল) (৳)',
     ];
 
     const rows = ownerStats.map((o, idx) => {
       const monthlySeats = o.monthlyTrips.reduce((acc, t) => acc + (t.totalBookedSeats || 0), 0);
+      const monthlyCargo = o.monthlyTrips.reduce((acc, t) => acc + (Number(t.totalCargoCollection) || 0), 0);
       const monthlyAmount = o.monthlyTrips.reduce((acc, t) => acc + (t.totalCollection || 0), 0);
+      const monthlySeatFare = o.monthlyTrips.reduce((acc, t) => {
+        const cargo = Math.max(0, Number(t.totalCargoCollection) || 0);
+        const total = Math.max(0, Number(t.totalCollection) || 0);
+        return acc + (t.totalSeatCollection !== undefined ? Number(t.totalSeatCollection) : Math.max(0, total - cargo));
+      }, 0);
       return [
         idx + 1,
         `"${o.ownerName}"`,
@@ -246,6 +254,8 @@ export const VehiclesPage: React.FC = () => {
         o.dailyTrips.length,
         o.monthlyTrips.length,
         monthlySeats,
+        monthlySeatFare,
+        monthlyCargo,
         monthlyAmount,
       ].join(',');
     });
@@ -685,9 +695,21 @@ export const VehiclesPage: React.FC = () => {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {ownerStats.map((o) => {
               const monthlySeats = o.monthlyTrips.reduce((acc, t) => acc + (t.totalBookedSeats || 0), 0);
-              const monthlyAmount = o.monthlyTrips.reduce((acc, t) => acc + (t.totalCollection || 0), 0);
+              const monthlyCargo = o.monthlyTrips.reduce((acc, t) => acc + (Number(t.totalCargoCollection) || 0), 0);
+              const monthlySeatFare = o.monthlyTrips.reduce((acc, t) => {
+                const cargo = Math.max(0, Number(t.totalCargoCollection) || 0);
+                const total = Math.max(0, Number(t.totalCollection) || 0);
+                return acc + (t.totalSeatCollection !== undefined ? Number(t.totalSeatCollection) : Math.max(0, total - cargo));
+              }, 0);
+              const monthlyAmount = monthlySeatFare + monthlyCargo;
               const dailySeats = o.dailyTrips.reduce((acc, t) => acc + (t.totalBookedSeats || 0), 0);
-              const dailyAmount = o.dailyTrips.reduce((acc, t) => acc + (t.totalCollection || 0), 0);
+              const dailyCargo = o.dailyTrips.reduce((acc, t) => acc + (Number(t.totalCargoCollection) || 0), 0);
+              const dailySeatFare = o.dailyTrips.reduce((acc, t) => {
+                const cargo = Math.max(0, Number(t.totalCargoCollection) || 0);
+                const total = Math.max(0, Number(t.totalCollection) || 0);
+                return acc + (t.totalSeatCollection !== undefined ? Number(t.totalSeatCollection) : Math.max(0, total - cargo));
+              }, 0);
+              const dailyAmount = dailySeatFare + dailyCargo;
 
               return (
                 <div
@@ -751,7 +773,10 @@ export const VehiclesPage: React.FC = () => {
                         {toBengaliDigits(o.dailyTrips.length)} <span className="text-xs font-semibold">টি ট্রিপ</span>
                       </div>
                       <div className="text-[11px] text-blue-700 mt-1">
-                        যাত্রী: {toBengaliDigits(dailySeats)} | আদায়: {formatTaka(dailyAmount)}
+                        যাত্রী: {toBengaliDigits(dailySeats)} | মোট: <strong>{formatTaka(dailyAmount)}</strong>
+                      </div>
+                      <div className="text-[10px] text-blue-600/90 mt-0.5">
+                        সিট: {formatTaka(dailySeatFare)} | মাল: {formatTaka(dailyCargo)}
                       </div>
                     </div>
 
@@ -764,7 +789,10 @@ export const VehiclesPage: React.FC = () => {
                         {toBengaliDigits(o.monthlyTrips.length)} <span className="text-xs font-semibold">টি ট্রিপ</span>
                       </div>
                       <div className="text-[11px] text-emerald-700 mt-1">
-                        যাত্রী: {toBengaliDigits(monthlySeats)} | আদায়: {formatTaka(monthlyAmount)}
+                        যাত্রী: {toBengaliDigits(monthlySeats)} | মোট: <strong>{formatTaka(monthlyAmount)}</strong>
+                      </div>
+                      <div className="text-[10px] text-emerald-700/90 mt-0.5">
+                        সিট: {formatTaka(monthlySeatFare)} | মাল: {formatTaka(monthlyCargo)}
                       </div>
                     </div>
                   </div>

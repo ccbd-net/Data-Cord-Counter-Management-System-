@@ -12,11 +12,12 @@ import {
 import {
   groupSchedulesByRouteNumber,
   sortRoutesByNumber,
-  extractRouteNumber,
+  resolveRouteNumber,
   parseDepartureTimeToMinutes,
 } from '../utils/routeSort.ts';
 import { downloadDailyTripsPDF } from '../utils/pdfGenerator.ts';
 import { DigitalClockPicker } from '../components/DigitalClockPicker.tsx';
+import { ForwardUpTripsModal } from '../components/ForwardUpTripsModal.tsx';
 import {
   WeeklyScheduleTimeline,
   getWeekStartSaturday,
@@ -44,6 +45,7 @@ import {
   Layers,
   ArrowUpDown,
   TrendingUp,
+  Forward,
 } from 'lucide-react';
 
 export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: string) => void }> = ({
@@ -89,6 +91,8 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
 
   // Print / PDF Report Modal
   const [showReportModal, setShowReportModal] = useState<boolean>(false);
+  // Forward Yesterday's UP Trips Modal
+  const [showForwardModal, setShowForwardModal] = useState<boolean>(false);
 
   // Load vehicles, routes, supervisors and drivers list
   const [supervisorsList, setSupervisorsList] = useState<{ id: string; name: string }[]>([]);
@@ -208,10 +212,10 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
     const activeDownRoutes = sortRoutesByNumber(
       routesList.filter((r) => r.status === 'active' && r.direction === 'DOWN')
     );
-    const upNum = extractRouteNumber(trip.routeName);
+    const upNum = resolveRouteNumber(trip.routeNumber, trip.routeName);
     const matchingNumberRoute =
       upNum !== Number.MAX_SAFE_INTEGER
-        ? activeDownRoutes.find((r) => extractRouteNumber(r.name) === upNum)
+        ? activeDownRoutes.find((r) => resolveRouteNumber(r.routeNumber, r.name) === upNum)
         : undefined;
     const defaultRoute = matchingNumberRoute || activeDownRoutes[0] || routesList.find((r) => r.status === 'active');
 
@@ -325,12 +329,26 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
       );
     })
     .sort((a, b) => {
-      const rA = extractRouteNumber(a.routeName);
-      const rB = extractRouteNumber(b.routeName);
+      const rA = resolveRouteNumber(a.routeNumber, a.routeName);
+      const rB = resolveRouteNumber(b.routeNumber, b.routeName);
       if (rA !== rB) return rA - rB;
       if (a.date !== b.date) return a.date.localeCompare(b.date);
       return parseDepartureTimeToMinutes(a.departureTime) - parseDepartureTimeToMinutes(b.departureTime);
     });
+
+  // Backward-compatible schedule fare breakdown helper (Seat Fare + Cargo Fare = Total)
+  const getScheduleFares = (s: Schedule) => {
+    const cargoCol = Math.max(0, Number(s.totalCargoCollection) || 0);
+    const totalCol =
+      s.totalCollection !== undefined && s.totalCollection !== null
+        ? Math.max(0, Number(s.totalCollection) || 0)
+        : (s.totalBookedSeats || 0) * (s.fare || 0);
+    const seatCol =
+      s.totalSeatCollection !== undefined && s.totalSeatCollection !== null
+        ? Math.max(0, Number(s.totalSeatCollection) || 0)
+        : Math.max(0, totalCol - cargoCol);
+    return { seatCol, cargoCol, totalCol: seatCol + cargoCol };
+  };
 
   // Calculate Metrics
   const upTrips = filtered.filter((s) => s.direction === 'UP');
@@ -346,7 +364,9 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
 
   const totalBookedSeats = filtered.reduce((acc, s) => acc + (s.totalBookedSeats || 0), 0);
   const totalCapacity = filtered.reduce((acc, s) => acc + (s.seatCapacity || 40), 0);
-  const totalRevenue = filtered.reduce((acc, s) => acc + (s.totalCollection || (s.totalBookedSeats || 0) * s.fare), 0);
+  const totalSeatRevenue = filtered.reduce((acc, s) => acc + getScheduleFares(s).seatCol, 0);
+  const totalCargoRevenue = filtered.reduce((acc, s) => acc + getScheduleFares(s).cargoCol, 0);
+  const totalRevenue = totalSeatRevenue + totalCargoRevenue;
 
   // Group by vehicle for summary reporting
   const vehicleStatsMap: Record<
@@ -408,26 +428,35 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
       'মোবাইল',
       'বুকড সিট',
       'মোট সিট',
-      'ভাড়া (৳)',
+      'টিকিট হার (৳)',
+      'সিট ভাড়া আদায় (৳)',
+      'মালের ভাড়া (৳)',
+      'মোট টাকা (৳)',
       'স্ট্যাটাস',
     ];
 
-    const rows = filtered.map((s) => [
-      s.date,
-      s.tripNo,
-      s.direction === 'UP' ? 'আপ ট্রিপ' : 'ডাউন ট্রিপ',
-      s.tripSequenceLabel || '১ম ট্রিপ',
-      s.departureTime,
-      s.vehicleRegNo,
-      s.vehicleOwnerName || 'সাধারণ',
-      s.routeName,
-      s.supervisor,
-      s.supervisorPhone || '',
-      s.totalBookedSeats || 0,
-      s.seatCapacity || 40,
-      s.fare,
-      s.status || 'scheduled',
-    ]);
+    const rows = filtered.map((s) => {
+      const fares = getScheduleFares(s);
+      return [
+        s.date,
+        s.tripNo,
+        s.direction === 'UP' ? 'আপ ট্রিপ' : 'ডাউন ট্রিপ',
+        s.tripSequenceLabel || '১ম ট্রিপ',
+        s.departureTime,
+        s.vehicleRegNo,
+        s.vehicleOwnerName || 'সাধারণ',
+        s.routeName,
+        s.supervisor,
+        s.supervisorPhone || '',
+        s.totalBookedSeats || 0,
+        s.seatCapacity || 40,
+        s.fare,
+        fares.seatCol,
+        fares.cargoCol,
+        fares.totalCol,
+        s.status || 'scheduled',
+      ];
+    });
 
     const csvContent =
       'data:text/csv;charset=utf-8,\uFEFF' +
@@ -470,7 +499,19 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
         </div>
 
         {/* Global Action Buttons */}
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {canManageTrips && (
+            <button
+              type="button"
+              onClick={() => setShowForwardModal(true)}
+              className="px-3.5 py-2 bg-amber-500 hover:bg-amber-600 text-white rounded-xl text-xs font-black transition-all flex items-center gap-1.5 cursor-pointer shadow-xs"
+              title="গতকালের আপ ট্রিপ আজকের বা নির্ধারিত তারিখে ফরোয়ার্ড করুন"
+            >
+              <Forward className="w-4 h-4" />
+              <span>গতকালের আপ ট্রিপ ফরোয়ার্ড</span>
+            </button>
+          )}
+
           <button
             type="button"
             onClick={fetchSchedules}
@@ -752,9 +793,15 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
             <span className="text-2xl font-black text-slate-900">{toBengaliDigits(totalBookedSeats)}</span>
             <span className="text-xs text-slate-500 font-semibold">টি বুকড সিট</span>
           </div>
-          <div className="mt-2 pt-2 border-t border-slate-100 text-xs text-slate-600 flex items-center justify-between">
-            <span>মোট আদায়কৃত ভাড়া:</span>
-            <strong className="text-emerald-800 font-bold">{formatTaka(totalRevenue)}</strong>
+          <div className="mt-2 pt-2 border-t border-slate-100 text-xs text-slate-600 space-y-1">
+            <div className="flex items-center justify-between">
+              <span>মোট আদায় (সিট+মাল):</span>
+              <strong className="text-emerald-800 font-black tabular-nums">{formatTaka(totalRevenue)}</strong>
+            </div>
+            <div className="flex items-center justify-between text-[10px] text-slate-500">
+              <span>সিট: {formatTaka(totalSeatRevenue)}</span>
+              <span>মাল: {formatTaka(totalCargoRevenue)}</span>
+            </div>
           </div>
         </div>
       </div>
@@ -922,6 +969,18 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
           {/* Helper function to render a route table */}
           {(() => {
             const renderRouteTable = (group: RouteTripGroup, direction: 'UP' | 'DOWN') => {
+              const groupTotals = group.trips.reduce(
+                (acc, sch) => {
+                  const fares = getScheduleFares(sch);
+                  acc.seats += sch.totalBookedSeats || 0;
+                  acc.seatCol += fares.seatCol;
+                  acc.cargoCol += fares.cargoCol;
+                  acc.totalCol += fares.totalCol;
+                  return acc;
+                },
+                { seats: 0, seatCol: 0, cargoCol: 0, totalCol: 0 }
+              );
+
               return (
                 <div
                   key={`${direction}-${group.routeNumber}`}
@@ -960,33 +1019,36 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
                     <table className="w-full text-left border-collapse text-xs">
                       <thead>
                         <tr className="bg-slate-100 border-b border-slate-300 text-slate-700 font-bold uppercase text-[11px]">
-                          <th className="py-2.5 px-3 border-r border-slate-300 text-center w-14">সিরিয়াল</th>
-                          <th className="py-2.5 px-3 border-r border-slate-300">ট্রিপ নং</th>
-                          <th className="py-2.5 px-3 border-r border-slate-300">ছাড়ার সময়</th>
-                          <th className="py-2.5 px-3 border-r border-slate-300">গাড়ি নম্বর</th>
-                          <th className="py-2.5 px-3 border-r border-slate-300">মালিকের নাম</th>
-                          <th className="py-2.5 px-3 border-r border-slate-300">সুপারভাইজার</th>
-                          <th className="py-2.5 px-3 border-r border-slate-300">ড্রাইভার</th>
-                          <th className="py-2.5 px-3 border-r border-slate-300 text-center">সিট বুকিং</th>
-                          <th className="py-2.5 px-3 border-r border-slate-300 text-right">ভাড়া</th>
-                          <th className="py-2.5 px-3 border-r border-slate-300 text-center">ফিরতি / সমন্বয়</th>
-                          <th className="py-2.5 px-3 text-right">পদক্ষেপ</th>
+                          <th className="py-2.5 px-2.5 border-r border-slate-300 text-center w-12">সিরিয়াল</th>
+                          <th className="py-2.5 px-2.5 border-r border-slate-300">ট্রিপ নং</th>
+                          <th className="py-2.5 px-2.5 border-r border-slate-300">ছাড়ার সময়</th>
+                          <th className="py-2.5 px-2.5 border-r border-slate-300">গাড়ি নম্বর</th>
+                          <th className="py-2.5 px-2.5 border-r border-slate-300">মালিকের নাম</th>
+                          <th className="py-2.5 px-2.5 border-r border-slate-300">সুপারভাইজার</th>
+                          <th className="py-2.5 px-2.5 border-r border-slate-300">ড্রাইভার</th>
+                          <th className="py-2.5 px-2.5 border-r border-slate-300 text-center">সিট বুকিং</th>
+                          <th className="py-2.5 px-2.5 border-r border-slate-300 text-right bg-blue-50/70">সিট ভাড়া</th>
+                          <th className="py-2.5 px-2.5 border-r border-slate-300 text-right bg-amber-50/70">মালের ভাড়া</th>
+                          <th className="py-2.5 px-2.5 border-r border-slate-300 text-right bg-emerald-50/80 font-black">মোট টাকা</th>
+                          <th className="py-2.5 px-2.5 border-r border-slate-300 text-center">ফিরতি / সমন্বয়</th>
+                          <th className="py-2.5 px-2.5 text-right">পদক্ষেপ</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-200 font-medium">
                         {group.trips.map((sch) => {
                           const booked = sch.totalBookedSeats || 0;
                           const percent = Math.round((booked / sch.seatCapacity) * 100);
+                          const fares = getScheduleFares(sch);
 
                           return (
                             <tr key={sch.id} className="hover:bg-blue-50/40 transition-colors">
-                              <td className="py-2.5 px-3 border-r border-slate-200 text-center font-mono font-bold text-slate-800 bg-slate-50/60">
+                              <td className="py-2.5 px-2.5 border-r border-slate-200 text-center font-mono font-bold text-slate-800 bg-slate-50/60">
                                 {toBengaliDigits(sch.serialInRoute)}
                               </td>
-                              <td className="py-2.5 px-3 border-r border-slate-200 font-mono font-bold text-slate-900">
+                              <td className="py-2.5 px-2.5 border-r border-slate-200 font-mono font-bold text-slate-900">
                                 {sch.tripNo}
                               </td>
-                              <td className="py-2.5 px-3 border-r border-slate-200">
+                              <td className="py-2.5 px-2.5 border-r border-slate-200">
                                 <span className="font-bold text-slate-900 text-xs px-2 py-0.5 rounded bg-slate-100 font-mono">
                                   {sch.departureTime}
                                 </span>
@@ -994,25 +1056,25 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
                                   {sch.date}
                                 </span>
                               </td>
-                              <td className="py-2.5 px-3 border-r border-slate-200 font-bold text-slate-900">
+                              <td className="py-2.5 px-2.5 border-r border-slate-200 font-bold text-slate-900">
                                 <div>{sch.vehicleRegNo}</div>
                                 <span className="text-[10px] text-slate-500 font-normal">
-                                  {toBengaliDigits(sch.seatCapacity)} সিট
+                                  {toBengaliDigits(sch.seatCapacity)} সিট · ৳{toBengaliDigits(sch.fare)}
                                 </span>
                               </td>
-                              <td className="py-2.5 px-3 border-r border-slate-200 text-slate-700">
+                              <td className="py-2.5 px-2.5 border-r border-slate-200 text-slate-700">
                                 {sch.vehicleOwnerName || 'সাধারণ'}
                               </td>
-                              <td className="py-2.5 px-3 border-r border-slate-200 text-slate-800">
+                              <td className="py-2.5 px-2.5 border-r border-slate-200 text-slate-800">
                                 <div>{sch.supervisor || 'অনির্ধারিত'}</div>
                                 {sch.supervisorPhone && (
                                   <div className="text-[10px] text-slate-500">{sch.supervisorPhone}</div>
                                 )}
                               </td>
-                              <td className="py-2.5 px-3 border-r border-slate-200 text-slate-800">
+                              <td className="py-2.5 px-2.5 border-r border-slate-200 text-slate-800">
                                 {sch.driver || 'অনির্ধারিত'}
                               </td>
-                              <td className="py-2.5 px-3 border-r border-slate-200 text-center">
+                              <td className="py-2.5 px-2.5 border-r border-slate-200 text-center">
                                 <div className="font-bold text-slate-800">
                                   {toBengaliDigits(booked)}/{toBengaliDigits(sch.seatCapacity)}
                                 </div>
@@ -1020,10 +1082,16 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
                                   {toBengaliDigits(percent)}% পূর্ণ
                                 </div>
                               </td>
-                              <td className="py-2.5 px-3 border-r border-slate-200 text-right font-bold text-emerald-700">
-                                {formatTaka(sch.fare)}
+                              <td className="py-2.5 px-2.5 border-r border-slate-200 text-right font-bold text-blue-800 bg-blue-50/20 tabular-nums whitespace-nowrap">
+                                {formatTaka(fares.seatCol)}
                               </td>
-                              <td className="py-2.5 px-3 border-r border-slate-200 text-center">
+                              <td className="py-2.5 px-2.5 border-r border-slate-200 text-right font-bold text-amber-800 bg-amber-50/20 tabular-nums whitespace-nowrap">
+                                {formatTaka(fares.cargoCol)}
+                              </td>
+                              <td className="py-2.5 px-2.5 border-r border-slate-200 text-right font-black text-emerald-800 bg-emerald-50/30 tabular-nums whitespace-nowrap">
+                                {formatTaka(fares.totalCol)}
+                              </td>
+                              <td className="py-2.5 px-2.5 border-r border-slate-200 text-center">
                                 {sch.direction === 'UP' && !sch.returnTripCreated && (
                                   <button
                                     type="button"
@@ -1051,7 +1119,7 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
                                   </span>
                                 )}
                               </td>
-                              <td className="py-2.5 px-3 text-right">
+                              <td className="py-2.5 px-2.5 text-right">
                                 <div className="flex items-center justify-end gap-1.5">
                                   <button
                                     type="button"
@@ -1089,6 +1157,28 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
                           );
                         })}
                       </tbody>
+                      <tfoot className="bg-slate-100 border-t-2 border-slate-300 font-black text-xs text-slate-900">
+                        <tr>
+                          <td colSpan={7} className="py-2 px-3 border-r border-slate-300 text-right">
+                            রুট মোট ({toBengaliDigits(group.trips.length)} টি ট্রিপ):
+                          </td>
+                          <td className="py-2 px-2.5 border-r border-slate-300 text-center tabular-nums">
+                            {toBengaliDigits(groupTotals.seats)} সিট
+                          </td>
+                          <td className="py-2 px-2.5 border-r border-slate-300 text-right text-blue-900 bg-blue-50/70 tabular-nums whitespace-nowrap">
+                            {formatTaka(groupTotals.seatCol)}
+                          </td>
+                          <td className="py-2 px-2.5 border-r border-slate-300 text-right text-amber-900 bg-amber-50/70 tabular-nums whitespace-nowrap">
+                            {formatTaka(groupTotals.cargoCol)}
+                          </td>
+                          <td className="py-2 px-2.5 border-r border-slate-300 text-right text-emerald-950 bg-emerald-100/70 tabular-nums whitespace-nowrap">
+                            {formatTaka(groupTotals.totalCol)}
+                          </td>
+                          <td colSpan={2} className="py-2 px-2.5 text-center text-[10px] text-slate-500">
+                            সিট + মাল = মোট
+                          </td>
+                        </tr>
+                      </tfoot>
                     </table>
                   </div>
                 </div>
@@ -1235,8 +1325,29 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
                       </div>
 
                       <div className="flex items-center justify-between">
-                        <span className="text-slate-500">টিকিট ভাড়া:</span>
-                        <span className="font-bold text-emerald-700 text-sm">{formatTaka(sch.fare)}</span>
+                        <span className="text-slate-500">টিকিট হার:</span>
+                        <span className="font-bold text-slate-800">{formatTaka(sch.fare)}</span>
+                      </div>
+                      <div className="grid grid-cols-3 gap-1.5 pt-1 text-[11px]">
+                        {(() => {
+                          const fares = getScheduleFares(sch);
+                          return (
+                            <>
+                              <div className="bg-blue-50 border border-blue-100 rounded-lg px-2 py-1 text-center">
+                                <span className="block text-[9.5px] text-blue-700">সিট ভাড়া</span>
+                                <strong className="text-blue-900 font-bold tabular-nums">{formatTaka(fares.seatCol)}</strong>
+                              </div>
+                              <div className="bg-amber-50 border border-amber-100 rounded-lg px-2 py-1 text-center">
+                                <span className="block text-[9.5px] text-amber-700">মালের ভাড়া</span>
+                                <strong className="text-amber-900 font-bold tabular-nums">{formatTaka(fares.cargoCol)}</strong>
+                              </div>
+                              <div className="bg-emerald-50 border border-emerald-200 rounded-lg px-2 py-1 text-center">
+                                <span className="block text-[9.5px] text-emerald-700">মোট টাকা</span>
+                                <strong className="text-emerald-900 font-black tabular-nums">{formatTaka(fares.totalCol)}</strong>
+                              </div>
+                            </>
+                          );
+                        })()}
                       </div>
 
                       {/* Return Trip / Round Trip Status Banner */}
@@ -1390,7 +1501,7 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
                           .filter((r) => r.status === 'active' && r.direction === 'DOWN')
                           .map((r) => (
                             <option key={r.id} value={r.id}>
-                              {r.name} {r.baseFare ? `(৳${toBengaliDigits(r.baseFare)})` : ''}
+                              {r.routeNumber ? `${toBengaliDigits(r.routeNumber)} নং রুট — ` : ''}{r.name} {r.baseFare ? `(৳${toBengaliDigits(r.baseFare)})` : ''}
                             </option>
                           ))}
                       </optgroup>
@@ -1401,7 +1512,7 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
                           .filter((r) => r.status === 'active' && r.direction !== 'DOWN')
                           .map((r) => (
                             <option key={r.id} value={r.id}>
-                              {r.name} ({r.direction === 'UP' ? 'আপ' : r.direction})
+                              {r.routeNumber ? `${toBengaliDigits(r.routeNumber)} নং রুট — ` : ''}{r.name} ({r.direction === 'UP' ? 'আপ' : r.direction})
                             </option>
                           ))}
                       </optgroup>
@@ -1598,7 +1709,7 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
                       .filter((r) => r.status === 'active')
                       .map((r) => (
                         <option key={r.id} value={r.id}>
-                          {r.name} ({r.direction === 'UP' ? 'আপ' : 'ডাউন'})
+                          {r.routeNumber ? `${toBengaliDigits(r.routeNumber)} নং রুট — ` : ''}{r.name} ({r.direction === 'UP' ? 'আপ' : 'ডাউন'})
                         </option>
                       ))}
                   </select>
@@ -1740,8 +1851,11 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
                   </strong>
                 </div>
                 <div>
-                  <span className="text-slate-500 block">মোট আদায়কৃত ভাড়া:</span>
+                  <span className="text-slate-500 block">মোট আদায় (সিট + মাল):</span>
                   <strong className="text-slate-900 font-bold text-sm">{formatTaka(totalRevenue)}</strong>
+                  <div className="text-[10px] text-slate-600">
+                    সিট: {formatTaka(totalSeatRevenue)} | মাল: {formatTaka(totalCargoRevenue)}
+                  </div>
                 </div>
               </div>
 
@@ -1806,30 +1920,55 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
                             <th className="border border-slate-300 p-1.5 text-left">সুপারভাইজার</th>
                             <th className="border border-slate-300 p-1.5 text-left">ড্রাইভার</th>
                             <th className="border border-slate-300 p-1.5 text-center">বুকড সিট</th>
-                            <th className="border border-slate-300 p-1.5 text-right">আদায় (৳)</th>
+                            <th className="border border-slate-300 p-1.5 text-right">সিট ভাড়া</th>
+                            <th className="border border-slate-300 p-1.5 text-right">মালের ভাড়া</th>
+                            <th className="border border-slate-300 p-1.5 text-right font-black">মোট টাকা</th>
                           </tr>
                         </thead>
                         <tbody>
-                          {rg.trips.map((s) => (
-                            <tr key={s.id} className="border-b border-slate-200">
-                              <td className="border border-slate-300 p-1.5 text-center font-bold">
-                                {toBengaliDigits(s.serialInRoute)}
-                              </td>
-                              <td className="border border-slate-300 p-1.5 font-bold">{s.tripNo}</td>
-                              <td className="border border-slate-300 p-1.5 font-bold">{s.departureTime}</td>
-                              <td className="border border-slate-300 p-1.5">{s.vehicleRegNo}</td>
-                              <td className="border border-slate-300 p-1.5">{s.vehicleOwnerName || 'সাধারণ'}</td>
-                              <td className="border border-slate-300 p-1.5">{s.supervisor}</td>
-                              <td className="border border-slate-300 p-1.5">{s.driver}</td>
-                              <td className="border border-slate-300 p-1.5 text-center font-bold">
-                                {toBengaliDigits(s.totalBookedSeats || 0)}/{toBengaliDigits(s.seatCapacity)}
-                              </td>
-                              <td className="border border-slate-300 p-1.5 text-right font-bold">
-                                {formatTaka(s.totalCollection || (s.totalBookedSeats || 0) * s.fare)}
-                              </td>
-                            </tr>
-                          ))}
+                          {rg.trips.map((s) => {
+                            const fares = getScheduleFares(s);
+                            return (
+                              <tr key={s.id} className="border-b border-slate-200">
+                                <td className="border border-slate-300 p-1.5 text-center font-bold">
+                                  {toBengaliDigits(s.serialInRoute)}
+                                </td>
+                                <td className="border border-slate-300 p-1.5 font-bold">{s.tripNo}</td>
+                                <td className="border border-slate-300 p-1.5 font-bold">{s.departureTime}</td>
+                                <td className="border border-slate-300 p-1.5">{s.vehicleRegNo}</td>
+                                <td className="border border-slate-300 p-1.5">{s.vehicleOwnerName || 'সাধারণ'}</td>
+                                <td className="border border-slate-300 p-1.5">{s.supervisor}</td>
+                                <td className="border border-slate-300 p-1.5">{s.driver}</td>
+                                <td className="border border-slate-300 p-1.5 text-center font-bold">
+                                  {toBengaliDigits(s.totalBookedSeats || 0)}/{toBengaliDigits(s.seatCapacity)}
+                                </td>
+                                <td className="border border-slate-300 p-1.5 text-right font-semibold tabular-nums">
+                                  {formatTaka(fares.seatCol)}
+                                </td>
+                                <td className="border border-slate-300 p-1.5 text-right font-semibold tabular-nums">
+                                  {formatTaka(fares.cargoCol)}
+                                </td>
+                                <td className="border border-slate-300 p-1.5 text-right font-bold tabular-nums">
+                                  {formatTaka(fares.totalCol)}
+                                </td>
+                              </tr>
+                            );
+                          })}
                         </tbody>
+                        <tfoot>
+                          <tr className="bg-slate-100 font-bold">
+                            <td colSpan={8} className="border border-slate-300 p-1.5 text-right">রুট মোট:</td>
+                            <td className="border border-slate-300 p-1.5 text-right tabular-nums">
+                              {formatTaka(rg.trips.reduce((sum, s) => sum + getScheduleFares(s).seatCol, 0))}
+                            </td>
+                            <td className="border border-slate-300 p-1.5 text-right tabular-nums">
+                              {formatTaka(rg.trips.reduce((sum, s) => sum + getScheduleFares(s).cargoCol, 0))}
+                            </td>
+                            <td className="border border-slate-300 p-1.5 text-right font-black tabular-nums">
+                              {formatTaka(rg.trips.reduce((sum, s) => sum + getScheduleFares(s).totalCol, 0))}
+                            </td>
+                          </tr>
+                        </tfoot>
                       </table>
                     </div>
                   ))}
@@ -1858,30 +1997,55 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
                             <th className="border border-slate-300 p-1.5 text-left">সুপারভাইজার</th>
                             <th className="border border-slate-300 p-1.5 text-left">ড্রাইভার</th>
                             <th className="border border-slate-300 p-1.5 text-center">বুকড সিট</th>
-                            <th className="border border-slate-300 p-1.5 text-right">আদায় (৳)</th>
+                            <th className="border border-slate-300 p-1.5 text-right">সিট ভাড়া</th>
+                            <th className="border border-slate-300 p-1.5 text-right">মালের ভাড়া</th>
+                            <th className="border border-slate-300 p-1.5 text-right font-black">মোট টাকা</th>
                           </tr>
                         </thead>
                         <tbody>
-                          {rg.trips.map((s) => (
-                            <tr key={s.id} className="border-b border-slate-200">
-                              <td className="border border-slate-300 p-1.5 text-center font-bold">
-                                {toBengaliDigits(s.serialInRoute)}
-                              </td>
-                              <td className="border border-slate-300 p-1.5 font-bold">{s.tripNo}</td>
-                              <td className="border border-slate-300 p-1.5 font-bold">{s.departureTime}</td>
-                              <td className="border border-slate-300 p-1.5">{s.vehicleRegNo}</td>
-                              <td className="border border-slate-300 p-1.5">{s.vehicleOwnerName || 'সাধারণ'}</td>
-                              <td className="border border-slate-300 p-1.5">{s.supervisor}</td>
-                              <td className="border border-slate-300 p-1.5">{s.driver}</td>
-                              <td className="border border-slate-300 p-1.5 text-center font-bold">
-                                {toBengaliDigits(s.totalBookedSeats || 0)}/{toBengaliDigits(s.seatCapacity)}
-                              </td>
-                              <td className="border border-slate-300 p-1.5 text-right font-bold">
-                                {formatTaka(s.totalCollection || (s.totalBookedSeats || 0) * s.fare)}
-                              </td>
-                            </tr>
-                          ))}
+                          {rg.trips.map((s) => {
+                            const fares = getScheduleFares(s);
+                            return (
+                              <tr key={s.id} className="border-b border-slate-200">
+                                <td className="border border-slate-300 p-1.5 text-center font-bold">
+                                  {toBengaliDigits(s.serialInRoute)}
+                                </td>
+                                <td className="border border-slate-300 p-1.5 font-bold">{s.tripNo}</td>
+                                <td className="border border-slate-300 p-1.5 font-bold">{s.departureTime}</td>
+                                <td className="border border-slate-300 p-1.5">{s.vehicleRegNo}</td>
+                                <td className="border border-slate-300 p-1.5">{s.vehicleOwnerName || 'সাধারণ'}</td>
+                                <td className="border border-slate-300 p-1.5">{s.supervisor}</td>
+                                <td className="border border-slate-300 p-1.5">{s.driver}</td>
+                                <td className="border border-slate-300 p-1.5 text-center font-bold">
+                                  {toBengaliDigits(s.totalBookedSeats || 0)}/{toBengaliDigits(s.seatCapacity)}
+                                </td>
+                                <td className="border border-slate-300 p-1.5 text-right font-semibold tabular-nums">
+                                  {formatTaka(fares.seatCol)}
+                                </td>
+                                <td className="border border-slate-300 p-1.5 text-right font-semibold tabular-nums">
+                                  {formatTaka(fares.cargoCol)}
+                                </td>
+                                <td className="border border-slate-300 p-1.5 text-right font-bold tabular-nums">
+                                  {formatTaka(fares.totalCol)}
+                                </td>
+                              </tr>
+                            );
+                          })}
                         </tbody>
+                        <tfoot>
+                          <tr className="bg-slate-100 font-bold">
+                            <td colSpan={8} className="border border-slate-300 p-1.5 text-right">রুট মোট:</td>
+                            <td className="border border-slate-300 p-1.5 text-right tabular-nums">
+                              {formatTaka(rg.trips.reduce((sum, s) => sum + getScheduleFares(s).seatCol, 0))}
+                            </td>
+                            <td className="border border-slate-300 p-1.5 text-right tabular-nums">
+                              {formatTaka(rg.trips.reduce((sum, s) => sum + getScheduleFares(s).cargoCol, 0))}
+                            </td>
+                            <td className="border border-slate-300 p-1.5 text-right font-black tabular-nums">
+                              {formatTaka(rg.trips.reduce((sum, s) => sum + getScheduleFares(s).totalCol, 0))}
+                            </td>
+                          </tr>
+                        </tfoot>
                       </table>
                     </div>
                   ))}
@@ -1899,6 +2063,22 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
           </div>
         </div>
       )}
+
+      {/* Forward Yesterday's UP Trips Modal */}
+      <ForwardUpTripsModal
+        isOpen={showForwardModal}
+        defaultTargetDate={dateMode === 'single' ? date : getTodayDhakaDate()}
+        onClose={() => setShowForwardModal(false)}
+        onForwarded={async (targetDate, createdCount) => {
+          setDateMode('single');
+          setDate(targetDate);
+          setDirectionTab('ALL');
+          setActionSuccessMsg(
+            `সফল! ${formatBengaliDate(targetDate)} তারিখের জন্য ${toBengaliDigits(createdCount)}টি আপ ট্রিপ ফরোয়ার্ড করে যুক্ত করা হয়েছে।`
+          );
+          await fetchSchedules();
+        }}
+      />
     </div>
   );
 };

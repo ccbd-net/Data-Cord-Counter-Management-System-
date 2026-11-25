@@ -73,19 +73,50 @@ export function parseDepartureTimeToMinutes(timeStr?: string): number {
 }
 
 /**
- * Sorts Route items numerically by route number (1, 2, 3...), then alphabetically.
+ * Resolves explicit numeric route number (if provided & positive) or extracts from routeName.
  */
-export function sortRoutesByNumber<T extends { name: string }>(routes: T[]): T[] {
+export function resolveRouteNumber(routeNumber?: number, routeName?: string): number {
+  if (typeof routeNumber === 'number' && !isNaN(routeNumber) && routeNumber > 0) {
+    return routeNumber;
+  }
+  return extractRouteNumber(routeName);
+}
+
+/**
+ * Safely splits a booking's fare into seatFare, cargoFare, and totalFare (backward compatible).
+ */
+export function getBookingFareParts(b: {
+  seatFare?: number;
+  cargoFare?: number;
+  totalFare?: number;
+}): { seatFare: number; cargoFare: number; totalFare: number } {
+  const cargoFare = Math.max(0, Number(b.cargoFare) || 0);
+  const totalFare = Math.max(0, Number(b.totalFare) || 0);
+  const seatFare =
+    b.seatFare !== undefined && b.seatFare !== null && !isNaN(Number(b.seatFare))
+      ? Math.max(0, Number(b.seatFare))
+      : Math.max(0, totalFare - cargoFare);
+  return {
+    seatFare,
+    cargoFare,
+    totalFare: seatFare + cargoFare,
+  };
+}
+
+/**
+ * Sorts Route items numerically by explicit routeNumber or extracted route number (1, 2, 3...), then alphabetically.
+ */
+export function sortRoutesByNumber<T extends { name: string; routeNumber?: number }>(routes: T[]): T[] {
   return [...routes].sort((a, b) => {
-    const numA = extractRouteNumber(a.name);
-    const numB = extractRouteNumber(b.name);
+    const numA = resolveRouteNumber(a.routeNumber, a.name);
+    const numB = resolveRouteNumber(b.routeNumber, b.name);
     if (numA !== numB) return numA - numB;
     return a.name.localeCompare(b.name, 'bn');
   });
 }
 
 export interface RouteScheduleGroup {
-  routeNumber: number; // Extracted numeric route number or sequential fallback
+  routeNumber: number; // Explicit or extracted numeric route number or sequential fallback
   displayOrder: number; // 1, 2, 3...
   routeName: string;
   trips: (Schedule & { serialInRoute: number })[];
@@ -96,22 +127,26 @@ export interface RouteScheduleGroup {
  * and sorts trips inside each route group chronologically by departureTime (and date).
  */
 export function groupSchedulesByRouteNumber(tripList: Schedule[]): RouteScheduleGroup[] {
-  const routeMap = new Map<string, Schedule[]>();
+  const routeMap = new Map<string, { routeNumber: number; trips: Schedule[] }>();
   for (const t of tripList) {
     const rName = (t.routeName || 'অনির্ধারিত রুট').trim();
-    if (!routeMap.has(rName)) routeMap.set(rName, []);
-    routeMap.get(rName)!.push(t);
+    const rNum = resolveRouteNumber(t.routeNumber, rName);
+    if (!routeMap.has(rName)) {
+      routeMap.set(rName, { routeNumber: rNum, trips: [] });
+    } else {
+      const entry = routeMap.get(rName)!;
+      if (rNum < entry.routeNumber) entry.routeNumber = rNum;
+    }
+    routeMap.get(rName)!.trips.push(t);
   }
 
-  const entries = Array.from(routeMap.entries()).sort(([nameA], [nameB]) => {
-    const numA = extractRouteNumber(nameA);
-    const numB = extractRouteNumber(nameB);
-    if (numA !== numB) return numA - numB;
+  const entries = Array.from(routeMap.entries()).sort(([nameA, valA], [nameB, valB]) => {
+    if (valA.routeNumber !== valB.routeNumber) return valA.routeNumber - valB.routeNumber;
     return nameA.localeCompare(nameB, 'bn');
   });
 
-  return entries.map(([routeName, trips], idx) => {
-    const sortedTrips = [...trips].sort((a, b) => {
+  return entries.map(([routeName, val], idx) => {
+    const sortedTrips = [...val.trips].sort((a, b) => {
       if (a.date !== b.date) return a.date.localeCompare(b.date);
       return (
         parseDepartureTimeToMinutes(a.departureTime) -
@@ -119,9 +154,8 @@ export function groupSchedulesByRouteNumber(tripList: Schedule[]): RouteSchedule
       );
     });
 
-    const extracted = extractRouteNumber(routeName);
     return {
-      routeNumber: extracted !== Number.MAX_SAFE_INTEGER ? extracted : idx + 1,
+      routeNumber: val.routeNumber !== Number.MAX_SAFE_INTEGER ? val.routeNumber : idx + 1,
       displayOrder: idx + 1,
       routeName,
       trips: sortedTrips.map((t, tIdx) => ({

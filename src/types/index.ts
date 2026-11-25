@@ -109,6 +109,7 @@ export interface Vehicle {
 export interface RouteItem {
   id: string;
   companyId?: string;
+  routeNumber?: number; // রুট নং (১, ২, ৩...)
   name: string;
   origin: string;
   destination: string;
@@ -135,6 +136,7 @@ export interface Schedule {
   tripSequenceLabel?: string; // '১ম ট্রিপ', '২য় ট্রিপ', '৩য় ট্রিপ'...
   seatCapacity: SeatCapacity;
   routeId: string;
+  routeNumber?: number; // রুট নং (১, ২, ৩...)
   routeName: string;
   supervisor: string;
   supervisorPhone?: string;
@@ -147,7 +149,9 @@ export interface Schedule {
   reconciled: boolean;
   reconciliationId?: string;
   totalBookedSeats: number;
-  totalCollection: number;
+  totalSeatCollection?: number; // শুধুমাত্র সিট বুকিং টাকা
+  totalCargoCollection?: number; // শুধুমাত্র মালের ভাড়া টাকা
+  totalCollection: number; // সিট বুকিং + মালের ভাড়া মোট টাকা
   linkedTripId?: string; // রাউন্ড ট্রিপ পেয়ার আইডি
   returnTripCreated?: boolean; // আপ ট্রিপের ফিরতি ট্রিপ তৈরি হয়েছে কিনা
   roundTripPairTripNo?: string; // পেয়ার করা ফিরতি ট্রিপের ট্রিপ নম্বর
@@ -188,7 +192,9 @@ export interface Booking {
   seatNumbers: string[];
   totalSeats: number;
   farePerSeat: number;
-  totalFare: number;
+  seatFare?: number; // সিট বুকিং ভাড়া (ম্যানুয়াল)
+  cargoFare?: number; // মালের ভাড়া (ম্যানুয়াল)
+  totalFare: number; // সিট ভাড়া + মালের ভাড়া
   status: 'booked' | 'cancelled';
   bookedAt: string;
   printedCount: number;
@@ -209,8 +215,14 @@ export interface Reconciliation {
   upTripNo?: string;
   downTripId?: string;
   downTripNo?: string;
+  upSeatCollection?: number;
+  upCargoCollection?: number;
   upCollection: number;
+  downSeatCollection?: number;
+  downCargoCollection?: number;
   downCollection: number;
+  totalSeatCollection?: number;
+  totalCargoCollection?: number;
   combinedCollection: number; // upCollection + downCollection
   status: 'completed' | 'pending' | 'flagged';
   isNightHoldMatch: boolean;
@@ -249,12 +261,16 @@ export interface AnalyticsSummary {
   seatsSold: number;
   ticketSales: number;
   activeTrips: number;
+  totalSeatCollections?: number;
+  totalCargoCollections?: number;
   totalCollections: number;
   unreconciledTrips: number;
   vehicleWiseCollections: Array<{
     regNo: string;
     upCollection: number;
     downCollection: number;
+    seatCollection?: number;
+    cargoCollection?: number;
     total: number;
   }>;
   counterWiseSales: Array<{
@@ -263,6 +279,8 @@ export interface AnalyticsSummary {
     counterCode: string;
     seatColor: string;
     seatsSold: number;
+    seatRevenue?: number;
+    cargoRevenue?: number;
     totalRevenue: number;
   }>;
 }

@@ -9,6 +9,7 @@ import {
   getTodayDhakaDate,
   formatBengaliDate,
 } from '../utils/formatters.ts';
+import { getBookingFareParts } from '../utils/routeSort.ts';
 import {
   ShieldCheck,
   Calendar,
@@ -135,7 +136,9 @@ export const SupervisorPanelPage: React.FC = () => {
 
   // Calculate manifest summary
   const totalBookedSeats = scheduleBookings.reduce((sum: number, b: Booking) => sum + b.seatNumbers.length, 0);
-  const totalRevenue = scheduleBookings.reduce((sum: number, b: Booking) => sum + b.totalFare, 0);
+  const totalSeatRevenue = scheduleBookings.reduce((sum: number, b: Booking) => sum + getBookingFareParts(b).seatFare, 0);
+  const totalCargoRevenue = scheduleBookings.reduce((sum: number, b: Booking) => sum + getBookingFareParts(b).cargoFare, 0);
+  const totalRevenue = totalSeatRevenue + totalCargoRevenue;
   const selectedSchedule = schedules.find((s) => s.id === selectedScheduleId);
 
   const handlePrint = () => {
@@ -507,12 +510,12 @@ export const SupervisorPanelPage: React.FC = () => {
                   </div>
 
                   <div className="p-3 bg-indigo-50 rounded-xl border border-indigo-200">
-                    <span className="text-indigo-700 text-[11px] block">মোট ভাড়া আদায়</span>
-                    <strong className="text-indigo-900 font-bold text-sm block">
+                    <span className="text-indigo-700 text-[11px] block">মোট ভাড়া আদায় (সিট+মাল)</span>
+                    <strong className="text-indigo-900 font-bold text-sm block tabular-nums">
                       {formatTaka(totalRevenue)}
                     </strong>
                     <span className="text-[10px] text-indigo-700">
-                      কাউন্টার বুকিং হিসাব
+                      সিট: {formatTaka(totalSeatRevenue)} | মাল: {formatTaka(totalCargoRevenue)}
                     </span>
                   </div>
                 </div>
@@ -557,61 +560,92 @@ export const SupervisorPanelPage: React.FC = () => {
                     <table className="w-full text-xs text-left">
                       <thead className="bg-slate-50 text-slate-600 font-semibold border-b border-slate-200">
                         <tr>
-                          <th className="px-4 py-3">সিট নং</th>
-                          <th className="px-4 py-3">যাত্রীর নাম ও মোবাইল</th>
-                          <th className="px-4 py-3">বোর্ডিং পয়েন্ট</th>
-                          <th className="px-4 py-3">গন্তব্য</th>
-                          <th className="px-4 py-3">ভাড়ার পরিমাণ</th>
-                          <th className="px-4 py-3">কাউন্টার ও টিকিট</th>
+                          <th className="px-3 py-3">সিট নং</th>
+                          <th className="px-3 py-3">যাত্রীর নাম ও মোবাইল</th>
+                          <th className="px-3 py-3">বোর্ডিং পয়েন্ট</th>
+                          <th className="px-3 py-3">গন্তব্য</th>
+                          <th className="px-3 py-3 text-right bg-blue-50/50">সিট ভাড়া</th>
+                          <th className="px-3 py-3 text-right bg-amber-50/50">মালের ভাড়া</th>
+                          <th className="px-3 py-3 text-right bg-emerald-50/60 font-bold">মোট টাকা</th>
+                          <th className="px-3 py-3">কাউন্টার ও টিকিট</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100">
-                        {filteredBookings.map((b: Booking) => (
-                          <tr key={b.id} className="hover:bg-slate-50/70 transition-colors">
-                            <td className="px-4 py-3 font-black text-slate-900">
-                              <div className="flex flex-wrap gap-1">
-                                {b.seatNumbers.map((s: string) => (
-                                  <span
-                                    key={s}
-                                    className="px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded font-bold text-xs"
-                                  >
-                                    {s}
+                        {filteredBookings.map((b: Booking) => {
+                          const parts = getBookingFareParts(b);
+                          return (
+                            <tr key={b.id} className="hover:bg-slate-50/70 transition-colors">
+                              <td className="px-3 py-3 font-black text-slate-900">
+                                {b.seatNumbers.length > 0 ? (
+                                  <div className="flex flex-wrap gap-1">
+                                    {b.seatNumbers.map((s: string) => (
+                                      <span
+                                        key={s}
+                                        className="px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded font-bold text-xs"
+                                      >
+                                        {s}
+                                      </span>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <span className="px-2 py-0.5 bg-amber-100 text-amber-800 rounded font-bold text-[10px]">
+                                    মালামাল বুকিং
                                   </span>
-                                ))}
-                              </div>
-                            </td>
-                            <td className="px-4 py-3">
-                              <div className="font-bold text-slate-800">{b.passengerName}</div>
-                              <a
-                                href={`tel:${b.passengerPhone}`}
-                                className="text-indigo-600 font-semibold hover:underline flex items-center gap-1 mt-0.5"
-                              >
-                                <Phone className="w-3 h-3" />
-                                {b.passengerPhone}
-                              </a>
-                            </td>
-                            <td className="px-4 py-3">
-                              <div className="flex items-center gap-1 text-slate-700 font-medium">
-                                <MapPin className="w-3 h-3 text-emerald-600" />
-                                {b.boardingPoint || 'কাউন্টার'}
-                              </div>
-                            </td>
-                            <td className="px-4 py-3 text-slate-600">
-                              {b.destination || (selectedSchedule.direction === 'UP' ? 'ঢাকা' : 'মাদারীপুর')}
-                            </td>
-                            <td className="px-4 py-3">
-                              <div className="font-bold text-slate-900">{formatTaka(b.totalFare)}</div>
-                              <span className="text-[10px] text-emerald-700 bg-emerald-50 px-1.5 py-0.2 rounded font-semibold">
-                                পেইড
-                              </span>
-                            </td>
-                            <td className="px-4 py-3">
-                              <div className="font-semibold text-slate-700">{b.counterName}</div>
-                              <div className="text-[10px] font-mono text-slate-400">{b.ticketNo}</div>
-                            </td>
-                          </tr>
-                        ))}
+                                )}
+                              </td>
+                              <td className="px-3 py-3">
+                                <div className="font-bold text-slate-800">{b.passengerName}</div>
+                                <a
+                                  href={`tel:${b.passengerPhone}`}
+                                  className="text-indigo-600 font-semibold hover:underline flex items-center gap-1 mt-0.5"
+                                >
+                                  <Phone className="w-3 h-3" />
+                                  {b.passengerPhone}
+                                </a>
+                              </td>
+                              <td className="px-3 py-3">
+                                <div className="flex items-center gap-1 text-slate-700 font-medium">
+                                  <MapPin className="w-3 h-3 text-emerald-600" />
+                                  {b.boardingPoint || 'কাউন্টার'}
+                                </div>
+                              </td>
+                              <td className="px-3 py-3 text-slate-600">
+                                {b.destination || (selectedSchedule.direction === 'UP' ? 'ঢাকা' : 'মাদারীপুর')}
+                              </td>
+                              <td className="px-3 py-3 text-right font-bold text-blue-800 bg-blue-50/20 tabular-nums whitespace-nowrap">
+                                {formatTaka(parts.seatFare)}
+                              </td>
+                              <td className="px-3 py-3 text-right font-bold text-amber-800 bg-amber-50/20 tabular-nums whitespace-nowrap">
+                                {formatTaka(parts.cargoFare)}
+                              </td>
+                              <td className="px-3 py-3 text-right font-black text-emerald-800 bg-emerald-50/30 tabular-nums whitespace-nowrap">
+                                {formatTaka(parts.totalFare)}
+                              </td>
+                              <td className="px-3 py-3">
+                                <div className="font-semibold text-slate-700">{b.counterName}</div>
+                                <div className="text-[10px] font-mono text-slate-400">{b.ticketNo}</div>
+                              </td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
+                      <tfoot className="bg-slate-100 border-t-2 border-slate-300 font-black text-xs text-slate-900">
+                        <tr>
+                          <td colSpan={4} className="px-3 py-2.5 text-right">
+                            সর্বমোট ({toBengaliDigits(filteredBookings.length)} টি এন্ট্রি):
+                          </td>
+                          <td className="px-3 py-2.5 text-right text-blue-900 bg-blue-50/60 tabular-nums whitespace-nowrap">
+                            {formatTaka(filteredBookings.reduce((sum, b) => sum + getBookingFareParts(b).seatFare, 0))}
+                          </td>
+                          <td className="px-3 py-2.5 text-right text-amber-900 bg-amber-50/60 tabular-nums whitespace-nowrap">
+                            {formatTaka(filteredBookings.reduce((sum, b) => sum + getBookingFareParts(b).cargoFare, 0))}
+                          </td>
+                          <td className="px-3 py-2.5 text-right text-emerald-950 bg-emerald-100/70 tabular-nums whitespace-nowrap">
+                            {formatTaka(filteredBookings.reduce((sum, b) => sum + getBookingFareParts(b).totalFare, 0))}
+                          </td>
+                          <td className="px-3 py-2.5 text-center text-[10px] text-slate-500">সিট + মাল = মোট</td>
+                        </tr>
+                      </tfoot>
                     </table>
                   </div>
                 )}
@@ -716,32 +750,45 @@ export const SupervisorPanelPage: React.FC = () => {
                     <th className="border border-slate-300 p-2 text-left">মোবাইল নম্বর</th>
                     <th className="border border-slate-300 p-2 text-left">বোর্ডিং পয়েন্ট</th>
                     <th className="border border-slate-300 p-2 text-left">গন্তব্য</th>
-                    <th className="border border-slate-300 p-2 text-right">ভাড়া (৳)</th>
+                    <th className="border border-slate-300 p-2 text-right">সিট ভাড়া</th>
+                    <th className="border border-slate-300 p-2 text-right">মালের ভাড়া</th>
+                    <th className="border border-slate-300 p-2 text-right font-black">মোট টাকা</th>
                     <th className="border border-slate-300 p-2 text-center">কাউন্টার</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {scheduleBookings.map((b: Booking, idx: number) => (
-                    <tr key={b.id} className="border-b border-slate-200">
-                      <td className="border border-slate-300 p-2 text-center">{toBengaliDigits(idx + 1)}</td>
-                      <td className="border border-slate-300 p-2 text-center font-bold font-mono">
-                        {b.seatNumbers.join(', ')}
-                      </td>
-                      <td className="border border-slate-300 p-2 font-medium">{b.passengerName}</td>
-                      <td className="border border-slate-300 p-2 font-mono">{b.passengerPhone}</td>
-                      <td className="border border-slate-300 p-2">{b.boardingPoint || 'কাউন্টার'}</td>
-                      <td className="border border-slate-300 p-2">{b.destination || (selectedSchedule.direction === 'UP' ? 'ঢাকা' : 'মাদারীপুর')}</td>
-                      <td className="border border-slate-300 p-2 text-right font-bold">{formatTaka(b.totalFare)}</td>
-                      <td className="border border-slate-300 p-2 text-center text-[10px]">{b.counterName}</td>
-                    </tr>
-                  ))}
+                  {scheduleBookings.map((b: Booking, idx: number) => {
+                    const parts = getBookingFareParts(b);
+                    return (
+                      <tr key={b.id} className="border-b border-slate-200">
+                        <td className="border border-slate-300 p-2 text-center">{toBengaliDigits(idx + 1)}</td>
+                        <td className="border border-slate-300 p-2 text-center font-bold font-mono">
+                          {b.seatNumbers.length > 0 ? b.seatNumbers.join(', ') : 'মালামাল'}
+                        </td>
+                        <td className="border border-slate-300 p-2 font-medium">{b.passengerName}</td>
+                        <td className="border border-slate-300 p-2 font-mono">{b.passengerPhone}</td>
+                        <td className="border border-slate-300 p-2">{b.boardingPoint || 'কাউন্টার'}</td>
+                        <td className="border border-slate-300 p-2">{b.destination || (selectedSchedule.direction === 'UP' ? 'ঢাকা' : 'মাদারীপুর')}</td>
+                        <td className="border border-slate-300 p-2 text-right font-semibold tabular-nums">{formatTaka(parts.seatFare)}</td>
+                        <td className="border border-slate-300 p-2 text-right font-semibold tabular-nums">{formatTaka(parts.cargoFare)}</td>
+                        <td className="border border-slate-300 p-2 text-right font-bold tabular-nums">{formatTaka(parts.totalFare)}</td>
+                        <td className="border border-slate-300 p-2 text-center text-[10px]">{b.counterName}</td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
                 <tfoot>
                   <tr className="bg-slate-50 font-bold">
                     <td colSpan={6} className="border border-slate-300 p-2 text-right">
-                      মোট আদায়কৃত ভাড়া:
+                      মোট আদায়কৃত টাকা (সিট + মাল):
                     </td>
-                    <td className="border border-slate-300 p-2 text-right text-emerald-800">
+                    <td className="border border-slate-300 p-2 text-right text-blue-800 tabular-nums">
+                      {formatTaka(totalSeatRevenue)}
+                    </td>
+                    <td className="border border-slate-300 p-2 text-right text-amber-800 tabular-nums">
+                      {formatTaka(totalCargoRevenue)}
+                    </td>
+                    <td className="border border-slate-300 p-2 text-right text-emerald-800 font-black tabular-nums">
                       {formatTaka(totalRevenue)}
                     </td>
                     <td className="border border-slate-300 p-2 text-center text-xs">

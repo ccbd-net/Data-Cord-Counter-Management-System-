@@ -125,6 +125,9 @@ export const ReconciliationPage: React.FC = () => {
       'সময়ের ব্যবধান (আপ সময় - ডাউন সময় = রেজাল্ট)',
       'রুট (রেজাল্ট)',
       'মোট কিলোমিটার (আপ কিমি + ডাউন কিমি = রেজাল্ট)',
+      'সিট ভাড়া আদায় (৳)',
+      'মালের ভাড়া (৳)',
+      'মোট টাকা (সিট+মাল) (৳)',
       'সুপারভাইজার',
       'ড্রাইভার',
     ];
@@ -135,6 +138,7 @@ export const ReconciliationPage: React.FC = () => {
       const timeDiff = calculateTimeDifference(p.upTrip?.departureTime, p.downTrip?.departureTime, p.isNightHoldMatch);
       const combinedRoute = combineRouteNames(p.upRouteName, p.downRouteName);
       const totalKm = (p.upDistanceKm || 75) + (p.downDistanceKm || 75);
+      const pf = getPairFares(p);
 
       return [
         idx + 1,
@@ -145,6 +149,9 @@ export const ReconciliationPage: React.FC = () => {
         `"${timeDiff}"`,
         `"${combinedRoute}"`,
         `"${p.upDistanceKm || 75} + ${p.downDistanceKm || 75} = ${totalKm} কিমি"`,
+        pf.totalSeat,
+        pf.totalCargo,
+        pf.combinedTotal,
         `"${p.supervisor || ''}"`,
         `"${p.driver || p.upTrip?.driver || p.downTrip?.driver || '-'}"`,
       ].join(',');
@@ -162,10 +169,34 @@ export const ReconciliationPage: React.FC = () => {
     URL.revokeObjectURL(url);
   };
 
+  // Backward-compatible seat/cargo fare breakdown helper per pair
+  const getPairFares = (p: any) => {
+    const upCargo = Math.max(0, Number(p.upCargoCollection) || 0);
+    const upTotal = Math.max(0, Number(p.upCollection) || 0);
+    const upSeat =
+      p.upSeatCollection !== undefined && p.upSeatCollection !== null
+        ? Math.max(0, Number(p.upSeatCollection) || 0)
+        : Math.max(0, upTotal - upCargo);
+
+    const downCargo = Math.max(0, Number(p.downCargoCollection) || 0);
+    const downTotal = Math.max(0, Number(p.downCollection) || 0);
+    const downSeat =
+      p.downSeatCollection !== undefined && p.downSeatCollection !== null
+        ? Math.max(0, Number(p.downSeatCollection) || 0)
+        : Math.max(0, downTotal - downCargo);
+
+    const totalSeat = upSeat + downSeat;
+    const totalCargo = upCargo + downCargo;
+    const combinedTotal = totalSeat + totalCargo;
+    return { upSeat, upCargo, upTotal: upSeat + upCargo, downSeat, downCargo, downTotal: downSeat + downCargo, totalSeat, totalCargo, combinedTotal };
+  };
+
   // Grand totals & status counts
-  const totalCombinedCollection = pairs.reduce((sum, p) => sum + p.combinedCollection, 0);
-  const totalUpCollection = pairs.reduce((sum, p) => sum + (p.upCollection || 0), 0);
-  const totalDownCollection = pairs.reduce((sum, p) => sum + (p.downCollection || 0), 0);
+  const totalSeatCollection = pairs.reduce((sum, p) => sum + getPairFares(p).totalSeat, 0);
+  const totalCargoCollection = pairs.reduce((sum, p) => sum + getPairFares(p).totalCargo, 0);
+  const totalCombinedCollection = totalSeatCollection + totalCargoCollection;
+  const totalUpCollection = pairs.reduce((sum, p) => sum + getPairFares(p).upTotal, 0);
+  const totalDownCollection = pairs.reduce((sum, p) => sum + getPairFares(p).downTotal, 0);
   const reconciledCount = pairs.filter((p) => p.reconciliationStatus === 'reconciled').length;
   const readyCount = pairs.filter((p) => p.reconciliationStatus === 'ready').length;
   const pendingCount = pairs.filter((p) => p.reconciliationStatus === 'incomplete').length;
@@ -250,11 +281,13 @@ export const ReconciliationPage: React.FC = () => {
       {/* Summary Stats Banner */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs">
-          <span className="text-xs font-semibold text-slate-500">মোট কম্বাইন্ড আদায় (Up + Down)</span>
-          <div className="text-2xl font-black text-emerald-700 mt-1">
+          <span className="text-xs font-semibold text-slate-500">মোট কম্বাইন্ড আদায় (সিট + মাল)</span>
+          <div className="text-2xl font-black text-emerald-700 mt-1 tabular-nums">
             {formatTaka(totalCombinedCollection)}
           </div>
-          <span className="text-[11px] text-slate-400">ফর্মুলা: আপ কালেকশন + ডাউন কালেকশন</span>
+          <span className="text-[11px] text-slate-500 font-semibold block">
+            সিট: {formatTaka(totalSeatCollection)} | মাল: {formatTaka(totalCargoCollection)}
+          </span>
         </div>
 
         <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs">
@@ -377,7 +410,9 @@ export const ReconciliationPage: React.FC = () => {
                   <th className="py-3 px-4 font-bold">গাড়ির নম্বর ও রুট</th>
                   <th className="py-3 px-4 font-bold">আপ ট্রিপ (Up Collection)</th>
                   <th className="py-3 px-4 font-bold">ডাউন ট্রিপ (Down Collection)</th>
-                  <th className="py-3 px-4 font-bold">মোট সমন্বয় আদায় (Up + Down)</th>
+                  <th className="py-3 px-3 font-bold text-right bg-blue-50/50">সিট ভাড়া</th>
+                  <th className="py-3 px-3 font-bold text-right bg-amber-50/50">মালের ভাড়া</th>
+                  <th className="py-3 px-3 font-bold text-right bg-emerald-50/70">মোট টাকা</th>
                   <th className="py-3 px-4 font-bold text-center">স্ট্যাটাস</th>
                   <th className="py-3 px-4 font-bold text-right">অ্যাকশন</th>
                 </tr>
@@ -386,6 +421,7 @@ export const ReconciliationPage: React.FC = () => {
                 {filteredPairs.map((p) => {
                   const isReconciled = p.reconciliationStatus === 'reconciled';
                   const isReady = p.reconciliationStatus === 'ready';
+                  const pf = getPairFares(p);
 
                   return (
                     <tr key={p.vehicleId} className="hover:bg-slate-50/80 transition-colors">
@@ -409,11 +445,12 @@ export const ReconciliationPage: React.FC = () => {
                             <div className="font-semibold text-slate-800">
                               {p.upTrip.tripNo} ({p.upTrip.departureTime})
                             </div>
-                            <div className="font-bold text-blue-700 text-xs">
-                              {formatTaka(p.upCollection)}
+                            <div className="font-bold text-blue-700 text-xs tabular-nums">
+                              {formatTaka(pf.upTotal)}
                             </div>
-                            <div className="text-[10px] text-slate-400">
+                            <div className="text-[10px] text-slate-500">
                               সিট বুকড: {toBengaliDigits(p.upTrip.totalBookedSeats || 0)}
+                              {pf.upCargo > 0 && ` | সিট: ${formatTaka(pf.upSeat)} + মাল: ${formatTaka(pf.upCargo)}`}
                             </div>
                             {p.isNightHoldMatch && (
                               <span className="inline-block mt-0.5 px-1.5 py-0.2 bg-purple-100 text-purple-800 text-[9px] rounded font-bold">
@@ -433,11 +470,12 @@ export const ReconciliationPage: React.FC = () => {
                             <div className="font-semibold text-slate-800">
                               {p.downTrip.tripNo} ({p.downTrip.departureTime})
                             </div>
-                            <div className="font-bold text-emerald-700 text-xs">
-                              {formatTaka(p.downCollection)}
+                            <div className="font-bold text-emerald-700 text-xs tabular-nums">
+                              {formatTaka(pf.downTotal)}
                             </div>
-                            <div className="text-[10px] text-slate-400">
+                            <div className="text-[10px] text-slate-500">
                               সিট বুকড: {toBengaliDigits(p.downTrip.totalBookedSeats || 0)}
+                              {pf.downCargo > 0 && ` | সিট: ${formatTaka(pf.downSeat)} + মাল: ${formatTaka(pf.downCargo)}`}
                             </div>
                           </div>
                         ) : (
@@ -445,13 +483,23 @@ export const ReconciliationPage: React.FC = () => {
                         )}
                       </td>
 
-                      {/* Combined Collection */}
-                      <td className="py-3 px-4">
-                        <div className="text-sm font-black text-slate-900">
-                          {formatTaka(p.combinedCollection)}
+                      {/* Seat Fare */}
+                      <td className="py-3 px-3 text-right font-bold text-blue-800 bg-blue-50/20 tabular-nums whitespace-nowrap">
+                        {formatTaka(pf.totalSeat)}
+                      </td>
+
+                      {/* Cargo Fare */}
+                      <td className="py-3 px-3 text-right font-bold text-amber-800 bg-amber-50/20 tabular-nums whitespace-nowrap">
+                        {formatTaka(pf.totalCargo)}
+                      </td>
+
+                      {/* Combined Total */}
+                      <td className="py-3 px-3 text-right bg-emerald-50/30 tabular-nums whitespace-nowrap">
+                        <div className="text-sm font-black text-emerald-900">
+                          {formatTaka(pf.combinedTotal)}
                         </div>
                         <div className="text-[10px] text-slate-500">
-                          ({formatTaka(p.upCollection)} + {formatTaka(p.downCollection)})
+                          ({formatTaka(pf.upTotal)} + {formatTaka(pf.downTotal)})
                         </div>
                       </td>
 
@@ -500,6 +548,25 @@ export const ReconciliationPage: React.FC = () => {
                   );
                 })}
               </tbody>
+              <tfoot className="bg-slate-100 border-t-2 border-slate-300 font-black text-xs text-slate-900">
+                <tr>
+                  <td colSpan={3} className="py-2.5 px-4 text-right">
+                    সর্বমোট ({toBengaliDigits(filteredPairs.length)} টি গাড়ি):
+                  </td>
+                  <td className="py-2.5 px-3 text-right text-blue-900 bg-blue-50/60 tabular-nums whitespace-nowrap">
+                    {formatTaka(filteredPairs.reduce((sum, p) => sum + getPairFares(p).totalSeat, 0))}
+                  </td>
+                  <td className="py-2.5 px-3 text-right text-amber-900 bg-amber-50/60 tabular-nums whitespace-nowrap">
+                    {formatTaka(filteredPairs.reduce((sum, p) => sum + getPairFares(p).totalCargo, 0))}
+                  </td>
+                  <td className="py-2.5 px-3 text-right text-emerald-950 bg-emerald-100/70 tabular-nums whitespace-nowrap">
+                    {formatTaka(filteredPairs.reduce((sum, p) => sum + getPairFares(p).combinedTotal, 0))}
+                  </td>
+                  <td colSpan={2} className="py-2.5 px-4 text-center text-[10px] text-slate-500">
+                    সিট + মাল = মোট
+                  </td>
+                </tr>
+              </tfoot>
             </table>
           </div>
         )}
@@ -637,14 +704,17 @@ export const ReconciliationPage: React.FC = () => {
                     <tr className="bg-slate-100 text-slate-900 text-center font-bold">
                       <th className="border border-slate-400 p-2 w-10">ক্রমিক নং</th>
                       <th className="border border-slate-400 p-2 w-24">তারিখ</th>
-                      <th className="border border-slate-400 p-2 w-36">গাড়ি নাম্বার</th>
-                      <th className="border border-slate-400 p-2 w-32">নাইট হোল্ড / রেগুলার ট্রিপ</th>
-                      <th className="border border-slate-400 p-2 w-44">সময় আপ ও ডাউন</th>
-                      <th className="border border-slate-400 p-2 w-36">সময়ের ব্যবধান (আপ সময় - ডাউন সময়)</th>
+                      <th className="border border-slate-400 p-2 w-32">গাড়ি নাম্বার</th>
+                      <th className="border border-slate-400 p-2 w-28">নাইট হোল্ড / রেগুলার</th>
+                      <th className="border border-slate-400 p-2 w-40">সময় আপ ও ডাউন</th>
+                      <th className="border border-slate-400 p-2 w-32">সময়ের ব্যবধান</th>
                       <th className="border border-slate-400 p-2">রুট (রেজাল্ট)</th>
-                      <th className="border border-slate-400 p-2 w-36 text-center">মোট কিলোমিটার</th>
-                      <th className="border border-slate-400 p-2 w-32">সুপারভাইজার</th>
-                      <th className="border border-slate-400 p-2 w-32">ড্রাইভার</th>
+                      <th className="border border-slate-400 p-2 w-28 text-center">মোট কিমি</th>
+                      <th className="border border-slate-400 p-2 text-right">সিট ভাড়া</th>
+                      <th className="border border-slate-400 p-2 text-right">মালের ভাড়া</th>
+                      <th className="border border-slate-400 p-2 text-right font-black">মোট টাকা</th>
+                      <th className="border border-slate-400 p-2 w-28">সুপারভাইজার</th>
+                      <th className="border border-slate-400 p-2 w-28">ড্রাইভার</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -656,25 +726,19 @@ export const ReconciliationPage: React.FC = () => {
                       const upDist = p.upDistanceKm || 75;
                       const downDist = p.downDistanceKm || 75;
                       const totalKm = upDist + downDist;
+                      const pf = getPairFares(p);
 
                       return (
                         <tr key={p.vehicleId} className="even:bg-slate-50/70 hover:bg-slate-100/50">
-                          {/* 1. ক্রমিক নং */}
                           <td className="border border-slate-400 p-2 text-center font-bold font-mono">
                             {idx + 1}
                           </td>
-
-                          {/* 2. তারিখ */}
                           <td className="border border-slate-400 p-2 text-center font-semibold whitespace-nowrap">
                             {date}
                           </td>
-
-                          {/* 3. গাড়ি নাম্বার */}
                           <td className="border border-slate-400 p-2 font-black text-slate-900 whitespace-nowrap">
                             {p.vehicleRegNo}
                           </td>
-
-                          {/* 4. নাইট হোল্ড / রেগুলার ট্রিপ */}
                           <td className="border border-slate-400 p-2 text-center">
                             {p.isNightHoldMatch ? (
                               <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold bg-purple-100 text-purple-900 border border-purple-300">
@@ -686,34 +750,31 @@ export const ReconciliationPage: React.FC = () => {
                               </span>
                             )}
                           </td>
-
-                          {/* 5. সময় আপ ও ডাউন */}
                           <td className="border border-slate-400 p-2 font-mono text-[10.5px]">
                             <div className="text-blue-900 font-bold">আপ: {upTime}</div>
                             <div className="text-emerald-900 font-bold">ডাউন: {downTime}</div>
                           </td>
-
-                          {/* 6. সময়ের ব্যবধান (আপ সময় - ডাউন সময় = রেজাল্ট) */}
                           <td className="border border-slate-400 p-2 text-center font-bold text-slate-800">
                             {timeDiff}
                           </td>
-
-                          {/* 7. রুট (রেজাল্ট) */}
                           <td className="border border-slate-400 p-2 font-bold text-slate-900">
                             {combinedRoute}
                           </td>
-
-                          {/* 8. মোট কিলোমিটার (আপ রুট দূরত্ব + ডাউন রুট দূরত্ব = রেজাল্ট) */}
                           <td className="border border-slate-400 p-2 text-center font-bold text-slate-900">
                             {toBengaliDigits(upDist)} + {toBengaliDigits(downDist)} = {toBengaliDigits(totalKm)} কিমি
                           </td>
-
-                          {/* 9. সুপারভাইজার */}
+                          <td className="border border-slate-400 p-2 text-right font-semibold tabular-nums whitespace-nowrap">
+                            {formatTaka(pf.totalSeat)}
+                          </td>
+                          <td className="border border-slate-400 p-2 text-right font-semibold tabular-nums whitespace-nowrap">
+                            {formatTaka(pf.totalCargo)}
+                          </td>
+                          <td className="border border-slate-400 p-2 text-right font-black tabular-nums whitespace-nowrap">
+                            {formatTaka(pf.combinedTotal)}
+                          </td>
                           <td className="border border-slate-400 p-2 font-medium text-slate-800">
                             {p.supervisor || 'কুদ্দুস'}
                           </td>
-
-                          {/* 10. ড্রাইভার */}
                           <td className="border border-slate-400 p-2 font-medium text-slate-800">
                             {p.driver || p.upTrip?.driver || p.downTrip?.driver || 'আল আমিন'}
                           </td>
@@ -723,12 +784,33 @@ export const ReconciliationPage: React.FC = () => {
 
                     {pairs.length === 0 && (
                       <tr>
-                        <td colSpan={10} className="border border-slate-400 p-6 text-center text-slate-500 font-semibold">
+                        <td colSpan={13} className="border border-slate-400 p-6 text-center text-slate-500 font-semibold">
                           এই তারিখে প্রদর্শনের জন্য কোনো ট্রিপ সমন্বয় ডাটা পাওয়া যায়নি।
                         </td>
                       </tr>
                     )}
                   </tbody>
+                  {pairs.length > 0 && (
+                    <tfoot>
+                      <tr className="bg-slate-200 font-black text-slate-900">
+                        <td colSpan={8} className="border border-slate-400 p-2 text-right">
+                          সর্বমোট আদায়কৃত টাকা (সিট + মাল):
+                        </td>
+                        <td className="border border-slate-400 p-2 text-right tabular-nums whitespace-nowrap">
+                          {formatTaka(totalSeatCollection)}
+                        </td>
+                        <td className="border border-slate-400 p-2 text-right tabular-nums whitespace-nowrap">
+                          {formatTaka(totalCargoCollection)}
+                        </td>
+                        <td className="border border-slate-400 p-2 text-right tabular-nums whitespace-nowrap">
+                          {formatTaka(totalCombinedCollection)}
+                        </td>
+                        <td colSpan={2} className="border border-slate-400 p-2 text-center text-[10px]">
+                          অডিট সম্পন্ন
+                        </td>
+                      </tr>
+                    </tfoot>
+                  )}
                 </table>
               </div>
 

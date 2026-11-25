@@ -27,6 +27,7 @@ export const RoutesPage: React.FC = () => {
   // Modal State for Add & Edit
   const [isModalOpen, setIsModalOpen] = useState<boolean>(false);
   const [editingRoute, setEditingRoute] = useState<RouteItem | null>(null);
+  const [routeNumber, setRouteNumber] = useState<string>('');
   const [name, setName] = useState<string>('');
   const [origin, setOrigin] = useState<string>('');
   const [destination, setDestination] = useState<string>('');
@@ -57,6 +58,11 @@ export const RoutesPage: React.FC = () => {
 
   const openAddModal = () => {
     setEditingRoute(null);
+    const maxRouteNo = routes.reduce((mx, rt) => {
+      const n = Number(rt.routeNumber) || 0;
+      return n > mx ? n : mx;
+    }, 0);
+    setRouteNumber(String(maxRouteNo + 1));
     setName('');
     setOrigin('');
     setDestination('');
@@ -70,6 +76,7 @@ export const RoutesPage: React.FC = () => {
 
   const openEditModal = (r: RouteItem) => {
     setEditingRoute(r);
+    setRouteNumber(r.routeNumber ? String(r.routeNumber) : '');
     setName(r.name || '');
     setOrigin(r.origin || '');
     setDestination(r.destination || '');
@@ -92,12 +99,14 @@ export const RoutesPage: React.FC = () => {
         .map((s) => s.trim())
         .filter(Boolean);
 
+      const routeNumVal = routeNumber.trim() && Number(routeNumber) > 0 ? Number(routeNumber) : undefined;
       const fareNum = baseFare.trim() ? Number(baseFare) : undefined;
       const distNum = distanceKm.trim() ? Number(distanceKm) : undefined;
       const finalName = name.trim() || `${origin} - ${destination}`;
 
       if (editingRoute) {
         await api.updateRoute(editingRoute.id, {
+          routeNumber: routeNumVal,
           name: finalName,
           origin,
           destination,
@@ -109,6 +118,7 @@ export const RoutesPage: React.FC = () => {
         setSuccessMsg(`রুট "${finalName}" এর তথ্য সফলভাবে আপডেট হয়েছে!`);
       } else {
         await api.createRoute({
+          routeNumber: routeNumVal,
           name: finalName,
           origin,
           destination,
@@ -276,7 +286,12 @@ export const RoutesPage: React.FC = () => {
             <div>
               <div className="flex items-start justify-between pb-3 border-b">
                 <div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {r.routeNumber && (
+                      <span className="px-2 py-0.5 rounded bg-slate-900 text-white text-[10px] font-black tabular-nums">
+                        রুট নং {toBengaliDigits(r.routeNumber)}
+                      </span>
+                    )}
                     <h3 className="font-bold text-sm text-slate-900">{r.name}</h3>
                     <span
                       className={`px-2 py-0.5 rounded text-[10px] font-bold ${
@@ -429,17 +444,33 @@ export const RoutesPage: React.FC = () => {
                 </p>
               </div>
 
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  রুটের নাম (Route Title)
-                </label>
-                <input
-                  type="text"
-                  value={name ?? ''}
-                  onChange={(e) => setName(e.target.value)}
-                  placeholder="যেমন: মাদারীপুর - পদ্মা সেতু - সায়েদাবাদ"
-                  className="w-full px-3 py-2 bg-slate-50 border rounded-xl text-xs outline-none focus:bg-white focus:ring-2 focus:ring-emerald-500"
-                />
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    রুট নং (১, ২, ৩...) *
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    value={routeNumber ?? ''}
+                    onChange={(e) => setRouteNumber(e.target.value)}
+                    placeholder="যেমন: ১"
+                    className="w-full px-3 py-2 bg-slate-50 border rounded-xl text-xs font-bold tabular-nums outline-none focus:bg-white focus:ring-2 focus:ring-emerald-500"
+                    required
+                  />
+                </div>
+                <div className="col-span-2">
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    রুটের নাম (Route Title)
+                  </label>
+                  <input
+                    type="text"
+                    value={name ?? ''}
+                    onChange={(e) => setName(e.target.value)}
+                    placeholder="যেমন: মাদারীপুর - পদ্মা সেতু - সায়েদাবাদ"
+                    className="w-full px-3 py-2 bg-slate-50 border rounded-xl text-xs outline-none focus:bg-white focus:ring-2 focus:ring-emerald-500"
+                  />
+                </div>
               </div>
 
               <div className="grid grid-cols-2 gap-3">

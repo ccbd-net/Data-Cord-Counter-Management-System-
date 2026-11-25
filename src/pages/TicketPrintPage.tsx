@@ -5,6 +5,7 @@ import { ThermalTicketModal } from '../components/ThermalTicketModal.tsx';
 import { PrinterSettingsModal } from '../components/PrinterSettingsModal.tsx';
 import { useDataSync } from '../hooks/useDataSync.ts';
 import { formatTaka, toBengaliDigits, formatBengaliDateTime, getTodayDhakaDate } from '../utils/formatters.ts';
+import { getBookingFareParts } from '../utils/routeSort.ts';
 import {
   Printer,
   Search,
@@ -158,86 +159,126 @@ export const TicketPrintPage: React.FC = () => {
                   <th className="py-3 px-4 font-bold">ট্রিপ ও সময়</th>
                   <th className="py-3 px-4 font-bold">যাত্রী ও ফোন</th>
                   <th className="py-3 px-4 font-bold">আসন</th>
-                  <th className="py-3 px-4 font-bold">মোট ভাড়া</th>
+                  <th className="py-3 px-3 font-bold text-right bg-blue-50/50">সিট ভাড়া</th>
+                  <th className="py-3 px-3 font-bold text-right bg-amber-50/50">মালের ভাড়া</th>
+                  <th className="py-3 px-3 font-bold text-right bg-emerald-50/70">মোট টাকা</th>
                   <th className="py-3 px-4 font-bold text-center">প্রিন্ট কাউন্ট</th>
                   <th className="py-3 px-4 font-bold text-right">অ্যাকশন</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {filteredBookings.map((b) => (
-                  <tr key={b.id} className="hover:bg-slate-50/80 transition-colors">
-                    <td className="py-3 px-4">
-                      <div className="font-mono font-bold text-slate-900">{b.ticketNo}</div>
-                      <div className="text-[10px] text-slate-400">{formatBengaliDateTime(b.bookedAt)}</div>
-                    </td>
+                {filteredBookings.map((b) => {
+                  const parts = getBookingFareParts(b);
+                  return (
+                    <tr key={b.id} className="hover:bg-slate-50/80 transition-colors">
+                      <td className="py-3 px-4">
+                        <div className="font-mono font-bold text-slate-900">{b.ticketNo}</div>
+                        <div className="text-[10px] text-slate-400">{formatBengaliDateTime(b.bookedAt)}</div>
+                      </td>
 
-                    <td className="py-3 px-4">
-                      <div className="flex items-center gap-1.5">
-                        <span
-                          className="w-2.5 h-2.5 rounded-full shrink-0"
-                          style={{ backgroundColor: b.counterColor }}
-                        />
-                        <span className="font-semibold text-slate-800">{b.counterName}</span>
-                      </div>
-                      <div className="text-[10px] text-slate-500">{b.bookedByUserName}</div>
-                    </td>
-
-                    <td className="py-3 px-4">
-                      <div className="font-bold text-slate-800">{b.tripNo} ({b.tripTime})</div>
-                      <div className="text-[10px] text-slate-500 truncate max-w-[150px]">{b.routeName}</div>
-                    </td>
-
-                    <td className="py-3 px-4">
-                      <div className="font-bold text-slate-800">{b.passengerName}</div>
-                      <div className="text-[11px] text-slate-500 font-mono">{b.passengerPhone || 'নেই'}</div>
-                    </td>
-
-                    <td className="py-3 px-4">
-                      <div className="flex flex-wrap gap-1">
-                        {b.seatNumbers.map((s) => (
+                      <td className="py-3 px-4">
+                        <div className="flex items-center gap-1.5">
                           <span
-                            key={s}
-                            className="px-1.5 py-0.5 rounded text-[11px] font-bold text-white shadow-2xs"
+                            className="w-2.5 h-2.5 rounded-full shrink-0"
                             style={{ backgroundColor: b.counterColor }}
-                          >
-                            {s}
+                          />
+                          <span className="font-semibold text-slate-800">{b.counterName}</span>
+                        </div>
+                        <div className="text-[10px] text-slate-500">{b.bookedByUserName}</div>
+                      </td>
+
+                      <td className="py-3 px-4">
+                        <div className="font-bold text-slate-800">{b.tripNo} ({b.tripTime})</div>
+                        <div className="text-[10px] text-slate-500 truncate max-w-[150px]">{b.routeName}</div>
+                      </td>
+
+                      <td className="py-3 px-4">
+                        <div className="font-bold text-slate-800">{b.passengerName}</div>
+                        <div className="text-[11px] text-slate-500 font-mono">{b.passengerPhone || 'নেই'}</div>
+                      </td>
+
+                      <td className="py-3 px-4">
+                        {b.seatNumbers.length > 0 ? (
+                          <>
+                            <div className="flex flex-wrap gap-1">
+                              {b.seatNumbers.map((s) => (
+                                <span
+                                  key={s}
+                                  className="px-1.5 py-0.5 rounded text-[11px] font-bold text-white shadow-2xs"
+                                  style={{ backgroundColor: b.counterColor }}
+                                >
+                                  {s}
+                                </span>
+                              ))}
+                            </div>
+                            <div className="text-[10px] text-slate-400 mt-0.5">
+                              মোট: {toBengaliDigits(b.totalSeats)} সিট
+                            </div>
+                          </>
+                        ) : (
+                          <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-800 text-[10px] font-bold">
+                            মালামাল বুকিং
                           </span>
-                        ))}
-                      </div>
-                      <div className="text-[10px] text-slate-400 mt-0.5">
-                        মোট: {toBengaliDigits(b.totalSeats)} সিট
-                      </div>
-                    </td>
+                        )}
+                      </td>
 
-                    <td className="py-3 px-4 font-bold text-emerald-800 text-sm">
-                      {formatTaka(b.totalFare)}
-                    </td>
+                      <td className="py-3 px-3 text-right font-bold text-blue-800 bg-blue-50/20 tabular-nums whitespace-nowrap">
+                        {formatTaka(parts.seatFare)}
+                      </td>
 
-                    <td className="py-3 px-4 text-center">
-                      <span
-                        className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                          b.printedCount > 0
-                            ? 'bg-emerald-100 text-emerald-800'
-                            : 'bg-slate-100 text-slate-600'
-                        }`}
-                      >
-                        {toBengaliDigits(b.printedCount || 0)} বার
-                      </span>
-                    </td>
+                      <td className="py-3 px-3 text-right font-bold text-amber-800 bg-amber-50/20 tabular-nums whitespace-nowrap">
+                        {formatTaka(parts.cargoFare)}
+                      </td>
 
-                    <td className="py-3 px-4 text-right">
-                      <button
-                        type="button"
-                        onClick={() => setSelectedBookingForPrint(b)}
-                        className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-xs hover:shadow-md transition-all cursor-pointer"
-                      >
-                        <Printer className="w-3.5 h-3.5" />
-                        <span>প্রিন্ট</span>
-                      </button>
-                    </td>
-                  </tr>
-                ))}
+                      <td className="py-3 px-3 text-right font-black text-emerald-800 bg-emerald-50/30 text-sm tabular-nums whitespace-nowrap">
+                        {formatTaka(parts.totalFare)}
+                      </td>
+
+                      <td className="py-3 px-4 text-center">
+                        <span
+                          className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                            b.printedCount > 0
+                              ? 'bg-emerald-100 text-emerald-800'
+                              : 'bg-slate-100 text-slate-600'
+                          }`}
+                        >
+                          {toBengaliDigits(b.printedCount || 0)} বার
+                        </span>
+                      </td>
+
+                      <td className="py-3 px-4 text-right">
+                        <button
+                          type="button"
+                          onClick={() => setSelectedBookingForPrint(b)}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-xs hover:shadow-md transition-all cursor-pointer"
+                        >
+                          <Printer className="w-3.5 h-3.5" />
+                          <span>প্রিন্ট</span>
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
+              <tfoot className="bg-slate-100 border-t-2 border-slate-300 font-black text-xs text-slate-900">
+                <tr>
+                  <td colSpan={5} className="py-2.5 px-4 text-right">
+                    সর্বমোট ({toBengaliDigits(filteredBookings.length)} টি ভাউচার):
+                  </td>
+                  <td className="py-2.5 px-3 text-right text-blue-900 bg-blue-50/60 tabular-nums whitespace-nowrap">
+                    {formatTaka(filteredBookings.reduce((sum, b) => sum + getBookingFareParts(b).seatFare, 0))}
+                  </td>
+                  <td className="py-2.5 px-3 text-right text-amber-900 bg-amber-50/60 tabular-nums whitespace-nowrap">
+                    {formatTaka(filteredBookings.reduce((sum, b) => sum + getBookingFareParts(b).cargoFare, 0))}
+                  </td>
+                  <td className="py-2.5 px-3 text-right text-emerald-950 bg-emerald-100/70 tabular-nums whitespace-nowrap">
+                    {formatTaka(filteredBookings.reduce((sum, b) => sum + getBookingFareParts(b).totalFare, 0))}
+                  </td>
+                  <td colSpan={2} className="py-2.5 px-4 text-center text-[10px] text-slate-500">
+                    সিট + মাল = মোট
+                  </td>
+                </tr>
+              </tfoot>
             </table>
           </div>
         )}

@@ -6,6 +6,7 @@ import { useDataSync } from '../hooks/useDataSync.ts';
 import { getTodayDhakaDate, toBengaliDigits } from '../utils/formatters.ts';
 import { sortRoutesByNumber } from '../utils/routeSort.ts';
 import { DigitalClockPicker } from '../components/DigitalClockPicker.tsx';
+import { ForwardUpTripsModal } from '../components/ForwardUpTripsModal.tsx';
 import {
   CalendarPlus,
   Bus,
@@ -16,6 +17,7 @@ import {
   User,
   Moon,
   MapPin,
+  Forward,
 } from 'lucide-react';
 
 export const ScheduleMakerPage: React.FC<{ onScheduleCreated?: () => void }> = ({
@@ -53,6 +55,7 @@ export const ScheduleMakerPage: React.FC<{ onScheduleCreated?: () => void }> = (
   const [errorMsg, setErrorMsg] = useState<string>('');
   const [successMsg, setSuccessMsg] = useState<string>('');
   const [showConfirmDoubleTrip, setShowConfirmDoubleTrip] = useState<boolean>(false);
+  const [showForwardModal, setShowForwardModal] = useState<boolean>(false);
 
   useEffect(() => {
     const loadPrerequisites = async () => {
@@ -198,7 +201,7 @@ export const ScheduleMakerPage: React.FC<{ onScheduleCreated?: () => void }> = (
   return (
     <div className="max-w-3xl mx-auto space-y-6">
       {/* Header */}
-      <div className="bg-white p-5 rounded-3xl border border-slate-200 shadow-xs flex items-center justify-between">
+      <div className="bg-white p-5 rounded-3xl border border-slate-200 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div className="flex items-center gap-3">
           <div className="w-12 h-12 rounded-2xl bg-emerald-50 border border-emerald-200 flex items-center justify-center text-emerald-700 font-bold shadow-xs">
             <CalendarPlus className="w-6 h-6" />
@@ -212,6 +215,15 @@ export const ScheduleMakerPage: React.FC<{ onScheduleCreated?: () => void }> = (
             </p>
           </div>
         </div>
+
+        <button
+          type="button"
+          onClick={() => setShowForwardModal(true)}
+          className="px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold shadow-xs hover:shadow-md transition-all flex items-center gap-1.5 cursor-pointer shrink-0"
+        >
+          <Forward className="w-4 h-4" />
+          <span>গতকালের আপ ট্রিপ ফরোয়ার্ড</span>
+        </button>
       </div>
 
       {/* Messages */}
@@ -376,7 +388,7 @@ export const ScheduleMakerPage: React.FC<{ onScheduleCreated?: () => void }> = (
             >
               {availableRoutes.map((r) => (
                 <option key={r.id} value={r.id}>
-                  {r.name} {r.baseFare ? `— ৳${r.baseFare}` : ''}
+                  {r.routeNumber ? `${toBengaliDigits(r.routeNumber)} নং রুট — ` : ''}{r.name} {r.baseFare ? `— ৳${r.baseFare}` : ''}
                 </option>
               ))}
             </select>
@@ -504,6 +516,22 @@ export const ScheduleMakerPage: React.FC<{ onScheduleCreated?: () => void }> = (
           </div>
         </div>
       )}
+
+      <ForwardUpTripsModal
+        isOpen={showForwardModal}
+        onClose={() => setShowForwardModal(false)}
+        defaultTargetDate={date}
+        onForwarded={(targetDate, createdCount, skippedCount) => {
+          setDate(targetDate);
+          setSuccessMsg(
+            `সফল! ${toBengaliDigits(createdCount)}টি আপ ট্রিপ ${targetDate} তারিখে ফরোয়ার্ড করা হয়েছে${
+              skippedCount > 0 ? ` (${toBengaliDigits(skippedCount)}টি ডুপ্লিকেট বাদ)` : ''
+            }।`
+          );
+          loadDaySchedules();
+          if (onScheduleCreated) onScheduleCreated();
+        }}
+      />
     </div>
   );
 };

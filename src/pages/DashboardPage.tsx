@@ -158,7 +158,9 @@ export const DashboardPage: React.FC<{ onNavigateTo: (tab: any) => void }> = ({ 
             <div className="text-xl sm:text-2xl font-black text-teal-800 tabular-nums">
               {formatTaka(summary?.totalCollections || 0)}
             </div>
-            <span className="text-[11px] text-slate-400">আজকের ক্যাশ মোট</span>
+            <span className="text-[11px] text-slate-500 block">
+              সিট: {formatTaka(summary?.totalSeatCollections || 0)} | মাল: {formatTaka(summary?.totalCargoCollections || 0)}
+            </span>
           </div>
         </div>
 

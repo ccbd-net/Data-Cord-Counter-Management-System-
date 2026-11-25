@@ -7,7 +7,7 @@ import { TripAlertBanner } from '../components/TripAlertBanner.tsx';
 import { ThermalTicketModal } from '../components/ThermalTicketModal.tsx';
 import { useDataSync } from '../hooks/useDataSync.ts';
 import { formatTaka, toBengaliDigits, getTodayDhakaDate, formatBengaliDate } from '../utils/formatters.ts';
-import { groupSchedulesByRouteNumber } from '../utils/routeSort.ts';
+import { groupSchedulesByRouteNumber, getBookingFareParts } from '../utils/routeSort.ts';
 import {
   Armchair,
   Calendar,
@@ -37,6 +37,7 @@ export const BookingPage: React.FC = () => {
   // Booking Form State
   const [selectedSeats, setSelectedSeats] = useState<string[]>([]);
   const [manualFare, setManualFare] = useState<string>('');
+  const [cargoFare, setCargoFare] = useState<string>('');
   const [passengerName, setPassengerName] = useState<string>('');
   const [passengerPhone, setPassengerPhone] = useState<string>('');
   const [boardingPoint, setBoardingPoint] = useState<string>('');
@@ -129,6 +130,7 @@ export const BookingPage: React.FC = () => {
       fetchScheduleDetails(selectedScheduleId);
       setSelectedSeats([]);
       setManualFare('');
+      setCargoFare('');
       setErrorMsg('');
       setSuccessMsg('');
     }
@@ -158,21 +160,32 @@ export const BookingPage: React.FC = () => {
   const activeCounter = counters.find((c) => c.id === selectedCounterId);
   const currentCounterColor = activeCounter?.seatColor || user?.counterColor || '#2563EB';
 
-  // Handle Submit Booking with Manual Fare
+  const parsedSeatFare =
+    selectedSeats.length > 0 && manualFare.trim() !== '' && !isNaN(Number(manualFare))
+      ? Math.max(0, Number(manualFare))
+      : 0;
+  const parsedCargoFare =
+    cargoFare.trim() !== '' && !isNaN(Number(cargoFare)) ? Math.max(0, Number(cargoFare)) : 0;
+  const currentTotalFare = parsedSeatFare + parsedCargoFare;
+
+  // Handle Submit Booking with Manual Seat Fare + Optional Cargo Fare
   const handleConfirmBooking = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!currentSchedule) {
       setErrorMsg('অনুগ্রহ করে একটি ট্রিপ শিডিউল নির্বাচন করুন।');
       return;
     }
-    if (selectedSeats.length === 0) {
-      setErrorMsg('কমপক্ষে একটি আসন নির্বাচন করুন!');
+
+    if (selectedSeats.length === 0 && parsedCargoFare <= 0) {
+      setErrorMsg('কমপক্ষে একটি আসন নির্বাচন করুন অথবা মালের ভাড়া প্রদান করুন!');
       return;
     }
 
-    const parsedManualFare = Number(manualFare);
-    if (manualFare.trim() === '' || isNaN(parsedManualFare) || parsedManualFare < 0) {
-      setErrorMsg('অনুগ্রহ করে নির্বাচিত সিট বুকিংয়ের জন্য ভাড়ার পরিমাণ ম্যানুয়ালী যুক্ত করুন!');
+    if (
+      selectedSeats.length > 0 &&
+      (manualFare.trim() === '' || isNaN(Number(manualFare)) || Number(manualFare) < 0)
+    ) {
+      setErrorMsg('অনুগ্রহ করে নির্বাচিত সিট বুকিংয়ের জন্য সিট ভাড়ার পরিমাণ ম্যানুয়ালী যুক্ত করুন!');
       return;
     }
 
@@ -189,16 +202,25 @@ export const BookingPage: React.FC = () => {
         boardingPoint: boardingPoint || activeCounter?.name || '',
         destination: destination || (currentSchedule.direction === 'UP' ? 'ঢাকা' : 'মাদারীপুর'),
         seatNumbers: selectedSeats,
-        manualFare: parsedManualFare,
+        seatFare: selectedSeats.length > 0 ? parsedSeatFare : 0,
+        cargoFare: parsedCargoFare,
+        totalFare: currentTotalFare,
       });
 
-      setSuccessMsg(`সিট (${selectedSeats.join(', ')}) মোট ভাড়া ৳${parsedManualFare} হিসেবে সফলভাবে বুকিং সম্পন্ন হয়েছে!`);
+      setSuccessMsg(
+        selectedSeats.length > 0
+          ? `সিট (${selectedSeats.join(', ')}) — সিট ভাড়া ${formatTaka(parsedSeatFare)}${
+              parsedCargoFare > 0 ? ` + মালের ভাড়া ${formatTaka(parsedCargoFare)}` : ''
+            } = মোট ${formatTaka(currentTotalFare)} সফলভাবে বুকিং সম্পন্ন হয়েছে!`
+          : `মালামাল বুকিং — মালের ভাড়া ${formatTaka(parsedCargoFare)} সফলভাবে সংরক্ষণ করা হয়েছে!`
+      );
       // Open thermal ticket modal immediately
       setPrintedBooking(res.booking);
 
       // Clear form
       setSelectedSeats([]);
       setManualFare('');
+      setCargoFare('');
       setPassengerName('');
       setPassengerPhone('');
 
@@ -206,7 +228,6 @@ export const BookingPage: React.FC = () => {
       await fetchScheduleDetails(currentSchedule.id);
     } catch (err: any) {
       setErrorMsg(err.message || 'বুকিং সম্পন্ন করা সম্ভব হয়নি। সিটটি হয়তো অন্য কেউ নিয়ে নিয়েছে!');
-      // Re-fetch to see latest collision
       if (currentSchedule) {
         await fetchScheduleDetails(currentSchedule.id);
       }
@@ -214,8 +235,6 @@ export const BookingPage: React.FC = () => {
       setBookingInProgress(false);
     }
   };
-
-  const currentTotalFare = manualFare !== '' && !isNaN(Number(manualFare)) ? Number(manualFare) : 0;
 
   const todayDhaka = getTodayDhakaDate();
   const routeGroups = groupSchedulesByRouteNumber(schedules);
@@ -443,60 +462,59 @@ export const BookingPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Main Layout: Left Bus Seat Map, Right Booking Form & Details */}
+      {/* Main Layout: Left Bus Seat Map, Right Booking Form */}
       {currentSchedule && (
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-          {/* Left Column: Interactive Seat Plan */}
-          <div className="lg:col-span-5 bg-white p-5 rounded-2xl border border-slate-200 shadow-xs flex flex-col items-center">
-            {/* Red Alert Banner if Trip Info Changed */}
-            <div className="w-full">
-              <TripAlertBanner schedule={currentSchedule} />
-            </div>
+        <div className="space-y-6">
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-5 items-start">
+            {/* Left Column: Interactive Seat Plan */}
+            <div className="md:col-span-6 xl:col-span-5 bg-white p-4 sm:p-5 rounded-2xl border border-slate-200 shadow-xs flex flex-col items-center">
+              {/* Red Alert Banner if Trip Info Changed */}
+              <div className="w-full">
+                <TripAlertBanner schedule={currentSchedule} />
+              </div>
 
-            <div className="w-full flex items-center justify-between mb-4 pb-2 border-b">
-              <div>
-                <div className="flex items-center gap-2">
-                  <h3 className="text-sm font-bold text-slate-800">{currentSchedule.vehicleRegNo}</h3>
-                  {currentSchedule.tripSequenceLabel && (
-                    <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-amber-100 text-amber-800 border border-amber-300">
-                      {currentSchedule.tripSequenceLabel}
-                    </span>
-                  )}
+              <div className="w-full flex items-center justify-between mb-4 pb-2 border-b gap-2">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-sm font-bold text-slate-800">{currentSchedule.vehicleRegNo}</h3>
+                    {currentSchedule.tripSequenceLabel && (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-amber-100 text-amber-800 border border-amber-300">
+                        {currentSchedule.tripSequenceLabel}
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs text-slate-500">
+                    {currentSchedule.vehicleOwnerName ? `মালিক: ${currentSchedule.vehicleOwnerName} | ` : ''}
+                    {currentSchedule.seatCapacity === 42 ? '৪২ সিট' : '৪৬ সিট'} | ছাড়ার সময়: {currentSchedule.departureTime}
+                  </p>
                 </div>
-                <p className="text-xs text-slate-500">
-                  {currentSchedule.vehicleOwnerName ? `মালিক: ${currentSchedule.vehicleOwnerName} | ` : ''}
-                  {currentSchedule.seatCapacity === 42 ? '৪২ সিট কনফিগারেশন' : '৪৬ সিট কনফিগারেশন'} | ছাড়ার সময়: {currentSchedule.departureTime}
-                </p>
+
+                <div className="text-right shrink-0">
+                  <span className="text-xs font-bold text-emerald-800 bg-emerald-50 px-2.5 py-1 rounded-lg border border-emerald-200">
+                    ভাড়া: ম্যানুয়াল
+                  </span>
+                </div>
               </div>
 
-              <div className="text-right">
-                <span className="text-xs font-bold text-emerald-800 bg-emerald-50 px-2.5 py-1 rounded-lg border border-emerald-200">
-                  ভাড়া: ম্যানুয়াল নির্ধারণ
-                </span>
-              </div>
+              <SeatMap
+                seatCapacity={currentSchedule.seatCapacity}
+                bookedSeats={bookedSeats}
+                selectedSeats={selectedSeats}
+                currentCounterColor={currentCounterColor}
+                onSeatToggle={handleSeatToggle}
+                counters={counters}
+              />
             </div>
 
-            <SeatMap
-              seatCapacity={currentSchedule.seatCapacity}
-              bookedSeats={bookedSeats}
-              selectedSeats={selectedSeats}
-              currentCounterColor={currentCounterColor}
-              onSeatToggle={handleSeatToggle}
-              counters={counters}
-            />
-          </div>
-
-          {/* Right Column: Booking Form & Aggregated Summary */}
-          <div className="lg:col-span-7 space-y-6">
-            {/* Booking Form Card */}
-            <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs">
-              <div className="flex items-center justify-between mb-4 pb-2 border-b">
+            {/* Right Column: Booking Form */}
+            <div className="md:col-span-6 xl:col-span-7 bg-white p-5 rounded-2xl border border-slate-200 shadow-xs">
+              <div className="flex items-center justify-between mb-4 pb-2 border-b gap-2">
                 <div>
                   <h3 className="font-bold text-base text-slate-800">যাত্রী তথ্য ও বুকিং কনফার্মেশন</h3>
-                  <p className="text-xs text-slate-500">আসন চূড়ান্ত করতে যাত্রীর তথ্য প্রদান করুন</p>
+                  <p className="text-xs text-slate-500">আসন ও মালের ভাড়া এন্ট্রি করে বুকিং সম্পন্ন করুন</p>
                 </div>
 
-                {/* Counter Selector (Disabled for normal booking_point users) */}
+                {/* Counter Selector */}
                 <div className="text-right">
                   <label className="text-[11px] font-semibold text-slate-500 block mb-1">
                     বুকিং কাউন্টার
@@ -545,7 +563,7 @@ export const BookingPage: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => setPrintedBooking(printedBooking)}
-                      className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold flex items-center gap-1"
+                      className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer"
                     >
                       <Printer className="w-3.5 h-3.5" />
                       <span>প্রিন্ট ভিউ</span>
@@ -555,7 +573,7 @@ export const BookingPage: React.FC = () => {
               )}
 
               <form onSubmit={handleConfirmBooking} className="space-y-4">
-                {/* Selected Seats Banner & Manual Fare Entry */}
+                {/* Selected Seats Banner & Seat + Cargo Fare Inputs */}
                 <div className="p-4 bg-slate-50 rounded-2xl border border-slate-200 space-y-3">
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-200 pb-3">
                     <div>
@@ -576,36 +594,40 @@ export const BookingPage: React.FC = () => {
                               (মোট {toBengaliDigits(selectedSeats.length)} টি আসন)
                             </span>
                           </div>
+                        ) : parsedCargoFare > 0 ? (
+                          <span className="text-amber-700 text-xs font-bold">
+                            মালামাল বুকিং (আসনবিহীন · শুধুমাত্র মালের ভাড়া)
+                          </span>
                         ) : (
                           <span className="text-slate-400 text-xs font-normal">
-                            বামপাশের বাস ম্যাপ থেকে আসন ক্লিক করুন
+                            বামপাশের বাস ম্যাপ থেকে আসন ক্লিক করুন অথবা মালের ভাড়া লিখুন
                           </span>
                         )}
                       </div>
                     </div>
 
-                    <div className="text-left sm:text-right">
-                      <span className="text-xs text-slate-500 font-semibold block">মোট প্রদেয় ভাড়া</span>
-                      <div className="text-xl font-black text-emerald-700">
-                        {selectedSeats.length > 0 && manualFare ? formatTaka(currentTotalFare) : '৳ ০'}
+                    <div className="text-left sm:text-right shrink-0">
+                      <span className="text-[11px] text-slate-500 font-semibold block">
+                        সিট ({formatTaka(parsedSeatFare)}) + মাল ({formatTaka(parsedCargoFare)})
+                      </span>
+                      <div className="text-xl font-black text-emerald-700 tabular-nums">
+                        মোট: {formatTaka(currentTotalFare)}
                       </div>
                     </div>
                   </div>
 
-                  {/* Manual Fare Input Section - Counter Manager Sets Fare */}
-                  <div className="bg-white p-3.5 rounded-xl border border-emerald-200/80 shadow-xs space-y-2">
-                    <div className="flex items-center justify-between flex-wrap gap-1">
-                      <label className="text-xs font-black text-emerald-950 flex items-center gap-1.5">
-                        <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                        <span>ম্যানুয়াল ভাড়ার পরিমাণ যুক্ত করুন (৳) *</span>
-                      </label>
-                      <span className="text-[11px] text-slate-500 font-medium">
-                        কোনো নির্দিষ্ট ভাড়া নেই (কাউন্টার ম্যানেজার ম্যানুয়াল ইনপুট)
-                      </span>
-                    </div>
+                  {/* Manual Seat Fare + Manual Cargo Fare Side by Side */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {/* Seat Fare Box */}
+                    <div className="bg-white p-3.5 rounded-xl border border-emerald-200/90 shadow-xs space-y-2">
+                      <div className="flex items-center justify-between gap-1">
+                        <label className="text-xs font-black text-emerald-950 flex items-center gap-1.5">
+                          <span className="w-2 h-2 rounded-full bg-emerald-500" />
+                          <span>সিট ভাড়া (ম্যানুয়াল ৳) {selectedSeats.length > 0 ? '*' : ''}</span>
+                        </label>
+                      </div>
 
-                    <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-center">
-                      <div className="sm:col-span-7 relative">
+                      <div className="relative">
                         <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-emerald-700 font-bold text-sm">
                           ৳
                         </div>
@@ -618,50 +640,73 @@ export const BookingPage: React.FC = () => {
                           disabled={selectedSeats.length === 0}
                           placeholder={
                             selectedSeats.length === 0
-                              ? 'আগে বামপাশ থেকে সিট নির্বাচন করুন'
-                              : `যেমন: ${selectedSeats.length * (currentSchedule.fare || 550)} (মোট ভাড়া)`
+                              ? 'সিট নিলে চালু হবে'
+                              : `যেমন: ${selectedSeats.length * (currentSchedule.fare || 550)}`
                           }
-                          className="w-full pl-8 pr-3 py-2 bg-emerald-50/30 border border-emerald-300 rounded-xl text-sm font-bold text-slate-900 placeholder-slate-400 focus:ring-2 focus:ring-emerald-500 focus:bg-white outline-none disabled:bg-slate-100 disabled:cursor-not-allowed"
+                          className="w-full pl-8 pr-3 py-2 bg-emerald-50/30 border border-emerald-300 rounded-xl text-sm font-bold text-slate-900 placeholder-slate-400 focus:ring-2 focus:ring-emerald-500 focus:bg-white outline-none disabled:bg-slate-100 disabled:cursor-not-allowed tabular-nums"
                         />
                       </div>
 
-                      <div className="sm:col-span-5 flex items-center gap-2">
-                        {currentSchedule.fare > 0 && selectedSeats.length > 0 && (
+                      {currentSchedule.fare > 0 && selectedSeats.length > 0 && (
+                        <div className="flex items-center justify-between gap-2 pt-0.5">
                           <button
                             type="button"
                             onClick={() => {
                               const refFare = currentSchedule.fare * selectedSeats.length;
                               setManualFare(String(refFare));
                             }}
-                            className="px-2.5 py-2 bg-emerald-100 hover:bg-emerald-200 text-emerald-900 rounded-xl text-[11px] font-bold transition-colors w-full text-center"
+                            className="px-2.5 py-1 bg-emerald-100 hover:bg-emerald-200 text-emerald-900 rounded-lg text-[11px] font-bold transition-colors cursor-pointer"
                             title="রেফারেন্স বেস ভাড়া স্বয়ংক্রিয়ভাবে ইনপুট বক্সে বসান"
                           >
-                            রেফারেন্স: ৳{toBengaliDigits(currentSchedule.fare * selectedSeats.length)}
+                            রেফারেন্স: {formatTaka(currentSchedule.fare * selectedSeats.length)}
                           </button>
-                        )}
-                      </div>
+                          {manualFare !== '' && (
+                            <span className="text-[11px] text-slate-600 tabular-nums">
+                              গড়: <strong className="text-emerald-700">{formatTaka(Math.round(parsedSeatFare / selectedSeats.length))}</strong>
+                            </span>
+                          )}
+                        </div>
+                      )}
                     </div>
 
-                    {selectedSeats.length > 0 && manualFare !== '' && (
-                      <div className="flex items-center justify-between text-[11px] text-slate-600 pt-1 border-t border-slate-100">
-                        <span>
-                          আসন সংখ্যা: <strong>{toBengaliDigits(selectedSeats.length)}</strong> টি
-                        </span>
-                        <span>
-                          প্রতি সিট গড় ভাড়া:{' '}
-                          <strong className="text-emerald-700">
-                            ৳{toBengaliDigits(Math.round(currentTotalFare / selectedSeats.length))}
-                          </strong>
+                    {/* Cargo / Goods Fare Box */}
+                    <div className="bg-white p-3.5 rounded-xl border border-amber-300/90 shadow-xs space-y-2">
+                      <div className="flex items-center justify-between gap-1">
+                        <label className="text-xs font-black text-amber-950 flex items-center gap-1.5">
+                          <span className="w-2 h-2 rounded-full bg-amber-500" />
+                          <span>মালের ভাড়া (ম্যানুয়াল ৳)</span>
+                        </label>
+                        <span className="text-[10px] font-bold text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded">
+                          ঐচ্ছিক
                         </span>
                       </div>
-                    )}
+
+                      <div className="relative">
+                        <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-amber-700 font-bold text-sm">
+                          ৳
+                        </div>
+                        <input
+                          type="number"
+                          min="0"
+                          step="10"
+                          value={cargoFare}
+                          onChange={(e) => setCargoFare(e.target.value)}
+                          placeholder="মালের ভাড়া লিখুন (যেমন: ২০০)"
+                          className="w-full pl-8 pr-3 py-2 bg-amber-50/30 border border-amber-300 rounded-xl text-sm font-bold text-slate-900 placeholder-slate-400 focus:ring-2 focus:ring-amber-500 focus:bg-white outline-none tabular-nums"
+                        />
+                      </div>
+
+                      <div className="text-[11px] text-slate-500">
+                        সিট বুকিংয়ের সাথে বা শুধু মালের ভাড়া যোগ করা যাবে
+                      </div>
+                    </div>
                   </div>
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div>
                     <label className="block text-xs font-bold text-slate-700 mb-1">
-                      যাত্রীর নাম
+                      যাত্রীর / প্রেরকের নাম
                     </label>
                     <div className="relative">
                       <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400">
@@ -671,7 +716,7 @@ export const BookingPage: React.FC = () => {
                         type="text"
                         value={passengerName}
                         onChange={(e) => setPassengerName(e.target.value)}
-                        placeholder="যাত্রীর পূর্ণ নাম"
+                        placeholder="যাত্রী বা মালামাল প্রেরকের নাম"
                         className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-emerald-500 focus:bg-white outline-none"
                       />
                     </div>
@@ -754,133 +799,187 @@ export const BookingPage: React.FC = () => {
                   type="submit"
                   disabled={
                     bookingInProgress ||
-                    selectedSeats.length === 0 ||
-                    manualFare.trim() === '' ||
-                    isNaN(Number(manualFare)) ||
-                    Number(manualFare) < 0
+                    (selectedSeats.length === 0 && parsedCargoFare <= 0) ||
+                    (selectedSeats.length > 0 &&
+                      (manualFare.trim() === '' ||
+                        isNaN(Number(manualFare)) ||
+                        Number(manualFare) < 0))
                   }
                   className="w-full py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-sm shadow-md hover:shadow-lg transition-all flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
                 >
                   {bookingInProgress ? (
                     'ডাটাবেজে সুরক্ষিত বুকিং নিশ্চিত করা হচ্ছে...'
-                  ) : selectedSeats.length === 0 ? (
-                    <span>প্রথমে এক বা একাধিক আসন নির্বাচন করুন</span>
-                  ) : manualFare.trim() === '' ? (
-                    <span>ভাড়ার পরিমাণ ম্যানুয়ালী যুক্ত করুন ({toBengaliDigits(selectedSeats.length)} আসন)</span>
+                  ) : selectedSeats.length === 0 && parsedCargoFare <= 0 ? (
+                    <span>সিট নির্বাচন করুন অথবা মালের ভাড়া লিখুন</span>
+                  ) : selectedSeats.length > 0 && manualFare.trim() === '' ? (
+                    <span>সিট ভাড়ার পরিমাণ ম্যানুয়ালী যুক্ত করুন ({toBengaliDigits(selectedSeats.length)} আসন)</span>
                   ) : (
                     <>
                       <Check className="w-4 h-4" />
                       <span>
-                        বুকিং কনফার্ম ও টিকিট প্রিন্ট করুন ({toBengaliDigits(selectedSeats.length)} আসন — {formatTaka(currentTotalFare)})
+                        {selectedSeats.length > 0
+                          ? `বুকিং কনফার্ম ও টিকিট প্রিন্ট করুন (${toBengaliDigits(selectedSeats.length)} আসন — ${formatTaka(currentTotalFare)})`
+                          : `মালামাল বুকিং কনফার্ম ও রসিদ প্রিন্ট করুন (${formatTaka(currentTotalFare)})`}
                       </span>
                     </>
                   )}
                 </button>
               </form>
             </div>
-
-            {/* Aggregated Booking Rows for this Trip */}
-            <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs">
-              <div className="flex items-center justify-between mb-4 pb-2 border-b">
-                <div>
-                  <h3 className="font-bold text-sm text-slate-800">
-                    এই ট্রিপের বুকিং রেকর্ড ({toBengaliDigits(bookedSeats.length)} টি টিকিট)
-                  </h3>
-                  <p className="text-xs text-slate-500">
-                    মোট বিক্রিত আসন: {toBengaliDigits(currentSchedule.totalBookedSeats || 0)} টি | আদায়: {formatTaka(currentSchedule.totalCollection || 0)}
-                  </p>
-                </div>
-              </div>
-
-              {bookedSeats.length === 0 ? (
-                <div className="text-center py-6 text-xs text-slate-400">
-                  এখনও কোনো আসন বুকিং হয়নি।
-                </div>
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left text-xs">
-                    <thead>
-                      <tr className="bg-slate-50 text-slate-600 border-b">
-                        <th className="py-2.5 px-3">টিকিট নং</th>
-                        <th className="py-2.5 px-3">কাউন্টার</th>
-                        <th className="py-2.5 px-3">যাত্রী ও ফোন</th>
-                        <th className="py-2.5 px-3">সিট নম্বর</th>
-                        <th className="py-2.5 px-3">মোট ভাড়া</th>
-                        <th className="py-2.5 px-3 text-right">অ্যাকশন</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {bookedSeats.map((b) => (
-                        <tr key={b.id} className="hover:bg-slate-50/80">
-                          <td className="py-2.5 px-3 font-mono font-bold text-slate-900">
-                            {b.ticketNo}
-                          </td>
-                          <td className="py-2.5 px-3">
-                            <div className="flex items-center gap-1.5">
-                              <span
-                                className="w-2.5 h-2.5 rounded-full"
-                                style={{ backgroundColor: b.counterColor }}
-                              />
-                              <span className="font-semibold text-slate-800">{b.counterName}</span>
-                            </div>
-                          </td>
-                          <td className="py-2.5 px-3">
-                            <div className="font-medium text-slate-800">{b.passengerName}</div>
-                            <div className="text-[10px] text-slate-400">{b.passengerPhone || 'নেই'}</div>
-                          </td>
-                          <td className="py-2.5 px-3">
-                            <div className="flex flex-wrap gap-1">
-                              {b.seatNumbers.map((s) => (
-                                <span
-                                  key={s}
-                                  className="px-1.5 py-0.5 rounded text-[11px] font-bold text-white"
-                                  style={{ backgroundColor: b.counterColor }}
-                                >
-                                  {s}
-                                </span>
-                              ))}
-                            </div>
-                          </td>
-                          <td className="py-2.5 px-3 font-bold text-slate-900">
-                            {formatTaka(b.totalFare)}
-                          </td>
-                          <td className="py-2.5 px-3 text-right space-x-1">
-                            <button
-                              type="button"
-                              onClick={() => setPrintedBooking(b)}
-                              className="p-1.5 bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-lg transition-colors"
-                              title="থার্মাল টিকিট প্রিন্ট করুন"
-                            >
-                              <Printer className="w-3.5 h-3.5" />
-                            </button>
-                            {(isMasterAdmin || isModerator || b.counterId === user?.counterId) && (
-                              <button
-                                type="button"
-                                onClick={async () => {
-                                  if (confirm(`আপনি কি নিশ্চিত যে টিকিট নং ${b.ticketNo} বাতিল করতে চান?`)) {
-                                    try {
-                                      await api.cancelBooking(b.id);
-                                      await fetchScheduleDetails(currentSchedule.id);
-                                    } catch (err: any) {
-                                      alert(err.message);
-                                    }
-                                  }
-                                }}
-                                className="p-1.5 bg-red-50 hover:bg-red-100 text-red-700 rounded-lg transition-colors text-[10px] font-bold"
-                                title="বাতিল করুন"
-                              >
-                                বাতিল
-                              </button>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
           </div>
+
+          {/* Full-width Booking Records Table Below */}
+          {(() => {
+            const totals = bookedSeats.reduce(
+              (acc, b) => {
+                const p = getBookingFareParts(b);
+                acc.seat += p.seatFare;
+                acc.cargo += p.cargoFare;
+                acc.total += p.totalFare;
+                return acc;
+              },
+              { seat: 0, cargo: 0, total: 0 }
+            );
+            return (
+              <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-4 pb-3 border-b">
+                  <div>
+                    <h3 className="font-bold text-sm text-slate-800">
+                      এই ট্রিপের বুকিং রেকর্ড ({toBengaliDigits(bookedSeats.length)} টি টিকিট/রসিদ)
+                    </h3>
+                    <p className="text-xs text-slate-500 mt-0.5 tabular-nums">
+                      মোট বিক্রিত আসন: <strong>{toBengaliDigits(currentSchedule.totalBookedSeats || 0)} টি</strong> ·{' '}
+                      সিট ভাড়া: <strong className="text-blue-700">{formatTaka(totals.seat)}</strong> ·{' '}
+                      মালের ভাড়া: <strong className="text-amber-700">{formatTaka(totals.cargo)}</strong> ·{' '}
+                      সর্বমোট আদায়: <strong className="text-emerald-700">{formatTaka(totals.total)}</strong>
+                    </p>
+                  </div>
+                </div>
+
+                {bookedSeats.length === 0 ? (
+                  <div className="text-center py-6 text-xs text-slate-400">
+                    এখনও কোনো আসন বা মালামাল বুকিং হয়নি।
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs border-collapse">
+                      <thead>
+                        <tr className="bg-slate-100 text-slate-700 border-b border-slate-300 font-bold">
+                          <th className="py-2.5 px-3">টিকিট নং</th>
+                          <th className="py-2.5 px-3">কাউন্টার</th>
+                          <th className="py-2.5 px-3">যাত্রী ও ফোন</th>
+                          <th className="py-2.5 px-3">সিট নম্বর / ধরন</th>
+                          <th className="py-2.5 px-3 text-right">সিট ভাড়া</th>
+                          <th className="py-2.5 px-3 text-right">মালের ভাড়া</th>
+                          <th className="py-2.5 px-3 text-right">মোট টাকা</th>
+                          <th className="py-2.5 px-3 text-right">অ্যাকশন</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {bookedSeats.map((b) => {
+                          const fp = getBookingFareParts(b);
+                          return (
+                            <tr key={b.id} className="hover:bg-slate-50/80">
+                              <td className="py-2.5 px-3 font-mono font-bold text-slate-900 whitespace-nowrap">
+                                {b.ticketNo}
+                              </td>
+                              <td className="py-2.5 px-3 whitespace-nowrap">
+                                <div className="flex items-center gap-1.5">
+                                  <span
+                                    className="w-2.5 h-2.5 rounded-full shrink-0"
+                                    style={{ backgroundColor: b.counterColor }}
+                                  />
+                                  <span className="font-semibold text-slate-800">{b.counterName}</span>
+                                </div>
+                              </td>
+                              <td className="py-2.5 px-3">
+                                <div className="font-medium text-slate-800">{b.passengerName}</div>
+                                <div className="text-[10px] text-slate-400">{b.passengerPhone || 'নেই'}</div>
+                              </td>
+                              <td className="py-2.5 px-3">
+                                {b.seatNumbers.length > 0 ? (
+                                  <div className="flex flex-wrap gap-1">
+                                    {b.seatNumbers.map((s) => (
+                                      <span
+                                        key={s}
+                                        className="px-1.5 py-0.5 rounded text-[11px] font-bold text-white"
+                                        style={{ backgroundColor: b.counterColor }}
+                                      >
+                                        {s}
+                                      </span>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-800 text-[10px] font-bold">
+                                    মালামাল বুকিং
+                                  </span>
+                                )}
+                              </td>
+                              <td className="py-2.5 px-3 text-right font-semibold text-slate-800 tabular-nums whitespace-nowrap">
+                                {formatTaka(fp.seatFare)}
+                              </td>
+                              <td className="py-2.5 px-3 text-right font-semibold text-amber-800 tabular-nums whitespace-nowrap">
+                                {formatTaka(fp.cargoFare)}
+                              </td>
+                              <td className="py-2.5 px-3 text-right font-black text-emerald-700 tabular-nums whitespace-nowrap">
+                                {formatTaka(fp.totalFare)}
+                              </td>
+                              <td className="py-2.5 px-3 text-right space-x-1 whitespace-nowrap">
+                                <button
+                                  type="button"
+                                  onClick={() => setPrintedBooking(b)}
+                                  className="p-1.5 bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-lg transition-colors cursor-pointer"
+                                  title="থার্মাল টিকিট প্রিন্ট করুন"
+                                >
+                                  <Printer className="w-3.5 h-3.5" />
+                                </button>
+                                {(isMasterAdmin || isModerator || b.counterId === user?.counterId) && (
+                                  <button
+                                    type="button"
+                                    onClick={async () => {
+                                      if (confirm(`আপনি কি নিশ্চিত যে টিকিট নং ${b.ticketNo} বাতিল করতে চান?`)) {
+                                        try {
+                                          await api.cancelBooking(b.id);
+                                          await fetchScheduleDetails(currentSchedule.id);
+                                        } catch (err: any) {
+                                          alert(err.message);
+                                        }
+                                      }
+                                    }}
+                                    className="p-1.5 bg-red-50 hover:bg-red-100 text-red-700 rounded-lg transition-colors text-[10px] font-bold cursor-pointer"
+                                    title="বাতিল করুন"
+                                  >
+                                    বাতিল
+                                  </button>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                      <tfoot>
+                        <tr className="bg-slate-100 border-t-2 border-slate-300 font-black text-slate-900">
+                          <td colSpan={4} className="py-2.5 px-3 text-right">
+                            সর্বমোট আদায় হিসাব:
+                          </td>
+                          <td className="py-2.5 px-3 text-right text-blue-800 tabular-nums whitespace-nowrap">
+                            {formatTaka(totals.seat)}
+                          </td>
+                          <td className="py-2.5 px-3 text-right text-amber-800 tabular-nums whitespace-nowrap">
+                            {formatTaka(totals.cargo)}
+                          </td>
+                          <td className="py-2.5 px-3 text-right text-emerald-800 tabular-nums whitespace-nowrap">
+                            {formatTaka(totals.total)}
+                          </td>
+                          <td />
+                        </tr>
+                      </tfoot>
+                    </table>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
         </div>
       )}
 

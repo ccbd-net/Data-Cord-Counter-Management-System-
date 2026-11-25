@@ -48,12 +48,18 @@ export interface DatabaseRow {
   totalDistanceKm: number;
   upSeatsAndFare: string;
   upBookedSeats: number;
+  upSeatFare: number;
+  upCargoFare: number;
   upFare: number;
   downSeatsAndFare: string;
   downBookedSeats: number;
+  downSeatFare: number;
+  downCargoFare: number;
   downFare: number;
   totalSeatsAndFare: string;
   combinedSeats: number;
+  combinedSeatFare: number;
+  combinedCargoFare: number;
   combinedFare: number;
   supervisorDisplay: string;
   driverDisplay: string;
@@ -187,6 +193,17 @@ function getRouteDistance(routes: RouteItem[], routeId?: string, routeName?: str
   return 110; // Default realistic distance in KM
 }
 
+function getScheduleFareBreakdown(s?: Schedule): { seat: number; cargo: number; total: number } {
+  if (!s) return { seat: 0, cargo: 0, total: 0 };
+  const cargo = Math.max(0, Number(s.totalCargoCollection) || 0);
+  const total = Math.max(0, Number(s.totalCollection) || 0);
+  const seat =
+    s.totalSeatCollection !== undefined && s.totalSeatCollection !== null
+      ? Math.max(0, Number(s.totalSeatCollection) || 0)
+      : Math.max(0, total - cargo);
+  return { seat, cargo, total: seat + cargo };
+}
+
 export const DatabasePage: React.FC = () => {
   const { isMasterAdmin } = useAuth();
   const [date, setDate] = useState<string>(getTodayDhakaDate());
@@ -314,17 +331,19 @@ export const DatabasePage: React.FC = () => {
           ? `${toBengaliDigits(upKm)} কিমি + ${toBengaliDigits(downKm)} কিমি = ${toBengaliDigits(totalDistanceKm)} কিমি`
           : `${toBengaliDigits(upKm)} কিমি`;
 
-        // Seats & Fares
+        // Seats & Fares (Seat + Cargo = Total)
         const upBookedSeats = upTrip.totalBookedSeats || 0;
-        const upFare = upTrip.totalCollection || 0;
+        const upFares = getScheduleFareBreakdown(upTrip);
         const downBookedSeats = downTrip?.totalBookedSeats || 0;
-        const downFare = downTrip?.totalCollection || 0;
+        const downFares = getScheduleFareBreakdown(downTrip);
         const combinedSeats = upBookedSeats + downBookedSeats;
-        const combinedFare = upFare + downFare;
+        const combinedSeatFare = upFares.seat + downFares.seat;
+        const combinedCargoFare = upFares.cargo + downFares.cargo;
+        const combinedFare = combinedSeatFare + combinedCargoFare;
 
-        const upSeatsAndFare = `${toBengaliDigits(upBookedSeats)} সিট | ${formatTaka(upFare)}`;
+        const upSeatsAndFare = `${toBengaliDigits(upBookedSeats)} সিট | ${formatTaka(upFares.total)}`;
         const downSeatsAndFare = downTrip
-          ? `${toBengaliDigits(downBookedSeats)} সিট | ${formatTaka(downFare)}`
+          ? `${toBengaliDigits(downBookedSeats)} সিট | ${formatTaka(downFares.total)}`
           : '-';
         const totalSeatsAndFare = `${toBengaliDigits(combinedSeats)} সিট | ${formatTaka(combinedFare)}`;
 
@@ -369,12 +388,18 @@ export const DatabasePage: React.FC = () => {
           totalDistanceKm,
           upSeatsAndFare,
           upBookedSeats,
-          upFare,
+          upSeatFare: upFares.seat,
+          upCargoFare: upFares.cargo,
+          upFare: upFares.total,
           downSeatsAndFare,
           downBookedSeats,
-          downFare,
+          downSeatFare: downFares.seat,
+          downCargoFare: downFares.cargo,
+          downFare: downFares.total,
           totalSeatsAndFare,
           combinedSeats,
+          combinedSeatFare,
+          combinedCargoFare,
           combinedFare,
           supervisorDisplay,
           driverDisplay,
@@ -415,16 +440,18 @@ export const DatabasePage: React.FC = () => {
             ? `${toBengaliDigits(upKm)} কিমি + ${toBengaliDigits(downKm)} কিমি = ${toBengaliDigits(totalDistanceKm)} কিমি`
             : `${toBengaliDigits(upKm || downKm)} কিমি`;
 
-        // Seats & Fares
+        // Seats & Fares (Seat + Cargo = Total)
         const upBookedSeats = upTrip?.totalBookedSeats || 0;
-        const upFare = upTrip?.totalCollection || 0;
+        const upFares = getScheduleFareBreakdown(upTrip);
         const downBookedSeats = downTrip?.totalBookedSeats || 0;
-        const downFare = downTrip?.totalCollection || 0;
+        const downFares = getScheduleFareBreakdown(downTrip);
         const combinedSeats = upBookedSeats + downBookedSeats;
-        const combinedFare = upFare + downFare;
+        const combinedSeatFare = upFares.seat + downFares.seat;
+        const combinedCargoFare = upFares.cargo + downFares.cargo;
+        const combinedFare = combinedSeatFare + combinedCargoFare;
 
-        const upSeatsAndFare = upTrip ? `${toBengaliDigits(upBookedSeats)} সিট | ${formatTaka(upFare)}` : '-';
-        const downSeatsAndFare = downTrip ? `${toBengaliDigits(downBookedSeats)} সিট | ${formatTaka(downFare)}` : '-';
+        const upSeatsAndFare = upTrip ? `${toBengaliDigits(upBookedSeats)} সিট | ${formatTaka(upFares.total)}` : '-';
+        const downSeatsAndFare = downTrip ? `${toBengaliDigits(downBookedSeats)} সিট | ${formatTaka(downFares.total)}` : '-';
         const totalSeatsAndFare = `${toBengaliDigits(combinedSeats)} সিট | ${formatTaka(combinedFare)}`;
 
         // Supervisor
@@ -468,12 +495,18 @@ export const DatabasePage: React.FC = () => {
           totalDistanceKm,
           upSeatsAndFare,
           upBookedSeats,
-          upFare,
+          upSeatFare: upFares.seat,
+          upCargoFare: upFares.cargo,
+          upFare: upFares.total,
           downSeatsAndFare,
           downBookedSeats,
-          downFare,
+          downSeatFare: downFares.seat,
+          downCargoFare: downFares.cargo,
+          downFare: downFares.total,
           totalSeatsAndFare,
           combinedSeats,
+          combinedSeatFare,
+          combinedCargoFare,
           combinedFare,
           supervisorDisplay,
           driverDisplay,
@@ -503,11 +536,11 @@ export const DatabasePage: React.FC = () => {
         const distanceKmDisplay = `${toBengaliDigits(upKm)} কিমি (আপ)`;
 
         const upBookedSeats = upTrip.totalBookedSeats || 0;
-        const upFare = upTrip.totalCollection || 0;
+        const upFares = getScheduleFareBreakdown(upTrip);
 
-        const upSeatsAndFare = `${toBengaliDigits(upBookedSeats)} সিট | ${formatTaka(upFare)}`;
+        const upSeatsAndFare = `${toBengaliDigits(upBookedSeats)} সিট | ${formatTaka(upFares.total)}`;
         const downSeatsAndFare = '-';
-        const totalSeatsAndFare = `${toBengaliDigits(upBookedSeats)} সিট | ${formatTaka(upFare)}`;
+        const totalSeatsAndFare = `${toBengaliDigits(upBookedSeats)} সিট | ${formatTaka(upFares.total)}`;
 
         rows.push({
           id: `row-today-nh-${autoSl}-${vehReg}`,
@@ -528,13 +561,19 @@ export const DatabasePage: React.FC = () => {
           totalDistanceKm: upKm,
           upSeatsAndFare,
           upBookedSeats,
-          upFare,
+          upSeatFare: upFares.seat,
+          upCargoFare: upFares.cargo,
+          upFare: upFares.total,
           downSeatsAndFare,
           downBookedSeats: 0,
+          downSeatFare: 0,
+          downCargoFare: 0,
           downFare: 0,
           totalSeatsAndFare,
           combinedSeats: upBookedSeats,
-          combinedFare: upFare,
+          combinedSeatFare: upFares.seat,
+          combinedCargoFare: upFares.cargo,
+          combinedFare: upFares.total,
           supervisorDisplay: upTrip.supervisor || '-',
           driverDisplay: upTrip.driver || '-',
           isFullTrip: false, // Counts on tomorrow's date!
@@ -570,7 +609,9 @@ export const DatabasePage: React.FC = () => {
     const nightHoldTrips = tableRows.filter((r) => r.isNightHold && r.isFullTrip).length;
     const pendingTrips = tableRows.filter((r) => !r.isFullTrip).length;
     const totalSeats = tableRows.reduce((sum, r) => sum + r.combinedSeats, 0);
-    const totalFare = tableRows.reduce((sum, r) => sum + r.combinedFare, 0);
+    const totalSeatFare = tableRows.reduce((sum, r) => sum + r.combinedSeatFare, 0);
+    const totalCargoFare = tableRows.reduce((sum, r) => sum + r.combinedCargoFare, 0);
+    const totalFare = totalSeatFare + totalCargoFare;
     const totalDistance = tableRows.reduce((sum, r) => sum + r.totalDistanceKm, 0);
 
     return {
@@ -578,6 +619,8 @@ export const DatabasePage: React.FC = () => {
       nightHoldTrips,
       pendingTrips,
       totalSeats,
+      totalSeatFare,
+      totalCargoFare,
       totalFare,
       totalDistance,
     };
@@ -594,6 +637,8 @@ export const DatabasePage: React.FC = () => {
         acc.downSeats += r.downBookedSeats;
         acc.downFare += r.downFare;
         acc.totalSeats += r.combinedSeats;
+        acc.totalSeatFare += r.combinedSeatFare;
+        acc.totalCargoFare += r.combinedCargoFare;
         acc.totalFare += r.combinedFare;
         return acc;
       },
@@ -605,12 +650,14 @@ export const DatabasePage: React.FC = () => {
         downSeats: 0,
         downFare: 0,
         totalSeats: 0,
+        totalSeatFare: 0,
+        totalCargoFare: 0,
         totalFare: 0,
       }
     );
   }, [filteredRows]);
 
-  // Export CSV with UTF-8 BOM containing all 13 columns
+  // Export CSV with UTF-8 BOM containing Seat + Cargo + Total columns
   const handleExportCSV = () => {
     const headers = [
       'সিরিয়াল',
@@ -624,7 +671,10 @@ export const DatabasePage: React.FC = () => {
       'মোট দূরত্ব (কিমি)',
       'আপ ট্রিপ সিট বুকিং ও ভাড়া',
       'ডাউন ট্রিপ সিট বুকিং ও ভাড়া',
-      'মোট সিট বুকিং ও মোট ভাড়া',
+      'মোট সিট সংখ্যা',
+      'সিট বুকিং টাকা (৳)',
+      'মালের ভাড়া (৳)',
+      'মোট টাকা (সিট+মাল) (৳)',
       'সুপারভাইজার',
       'ড্রাইভার',
       'স্ট্যাটাস',
@@ -642,7 +692,10 @@ export const DatabasePage: React.FC = () => {
       `"${r.distanceKmDisplay}"`,
       `"${r.upSeatsAndFare}"`,
       `"${r.downSeatsAndFare}"`,
-      `"${r.totalSeatsAndFare}"`,
+      r.combinedSeats,
+      r.combinedSeatFare,
+      r.combinedCargoFare,
+      r.combinedFare,
       `"${r.supervisorDisplay}"`,
       `"${r.driverDisplay}"`,
       `"${r.status}"`,
@@ -786,14 +839,14 @@ export const DatabasePage: React.FC = () => {
         {/* Total Revenue */}
         <div className="bg-amber-50 border border-amber-300 p-3.5 rounded-2xl shadow-xs">
           <div className="flex items-center justify-between text-amber-800 text-[11px] font-bold">
-            <span>মোট আদায়কৃত ভাড়া</span>
+            <span>মোট আদায় (সিট + মাল)</span>
             <TrendingUp className="w-4 h-4 text-amber-600" />
           </div>
-          <div className="text-xl font-black text-amber-950 mt-1">
+          <div className="text-xl font-black text-amber-950 mt-1 tabular-nums">
             {formatTaka(stats.totalFare)}
           </div>
-          <div className="text-[10px] text-amber-700 mt-0.5">
-            কাউন্টার মোট সংগ্রহ
+          <div className="text-[10px] text-amber-800 mt-0.5 font-semibold">
+            সিট: {formatTaka(stats.totalSeatFare)} | মাল: {formatTaka(stats.totalCargoFare)}
           </div>
         </div>
 
@@ -993,7 +1046,9 @@ export const DatabasePage: React.FC = () => {
                   <th className="px-2.5 py-2.5 border-r border-slate-300 min-w-[130px]">মোট দূরত্ব (কিমি)</th>
                   <th className="px-2.5 py-2.5 border-r border-slate-300 min-w-[130px] bg-blue-50/50">আপ সিট ও ভাড়া</th>
                   <th className="px-2.5 py-2.5 border-r border-slate-300 min-w-[130px] bg-emerald-50/50">ডাউন সিট ও ভাড়া</th>
-                  <th className="px-2.5 py-2.5 border-r border-slate-300 min-w-[140px] bg-amber-50/60 font-black">মোট সিট ও ভাড়া</th>
+                  <th className="px-2.5 py-2.5 border-r border-slate-300 min-w-[110px] text-right bg-blue-50/70">সিট বুকিং টাকা</th>
+                  <th className="px-2.5 py-2.5 border-r border-slate-300 min-w-[100px] text-right bg-amber-50/70">মালের ভাড়া</th>
+                  <th className="px-2.5 py-2.5 border-r border-slate-300 min-w-[115px] text-right bg-emerald-100/70 font-black">মোট টাকা</th>
                   <th className="px-2.5 py-2.5 border-r border-slate-300 min-w-[100px]">সুপারভাইজার</th>
                   <th className="px-2.5 py-2.5 min-w-[100px]">ড্রাইভার</th>
                 </tr>
@@ -1091,19 +1146,40 @@ export const DatabasePage: React.FC = () => {
                     {/* 10. আপ ট্রিপ সিট বুকিং সংখ্যা + মোট ভাড়া */}
                     <td className="px-2.5 py-2 border-r border-slate-300 bg-blue-50/30">
                       <div className="font-bold text-blue-900 text-xs">{row.upSeatsAndFare}</div>
+                      {row.upCargoFare > 0 && (
+                        <div className="text-[10px] text-amber-700 font-semibold">
+                          সিট: {formatTaka(row.upSeatFare)} | মাল: {formatTaka(row.upCargoFare)}
+                        </div>
+                      )}
                     </td>
 
                     {/* 11. ডাউন ট্রিপ সিট বুকিং সংখ্যা + মোট ভাড়া */}
                     <td className="px-2.5 py-2 border-r border-slate-300 bg-emerald-50/30">
                       <div className="font-bold text-emerald-900 text-xs">{row.downSeatsAndFare}</div>
+                      {row.downCargoFare > 0 && (
+                        <div className="text-[10px] text-amber-700 font-semibold">
+                          সিট: {formatTaka(row.downSeatFare)} | মাল: {formatTaka(row.downCargoFare)}
+                        </div>
+                      )}
                     </td>
 
-                    {/* 12. মোট সিট বুকিং ও মোট ভাড়ার টাকা */}
-                    <td className="px-2.5 py-2 border-r border-slate-300 bg-amber-50/50">
-                      <div className="font-black text-slate-900 text-xs">{row.totalSeatsAndFare}</div>
+                    {/* 12. সিট বুকিং টাকা */}
+                    <td className="px-2.5 py-2 border-r border-slate-300 text-right bg-blue-50/30 tabular-nums whitespace-nowrap">
+                      <div className="font-bold text-blue-900 text-xs">{formatTaka(row.combinedSeatFare)}</div>
+                      <div className="text-[10px] text-slate-500">{toBengaliDigits(row.combinedSeats)} সিট</div>
                     </td>
 
-                    {/* 13. সুপারভাইজার */}
+                    {/* 13. মালের ভাড়া */}
+                    <td className="px-2.5 py-2 border-r border-slate-300 text-right bg-amber-50/30 tabular-nums whitespace-nowrap">
+                      <div className="font-bold text-amber-800 text-xs">{formatTaka(row.combinedCargoFare)}</div>
+                    </td>
+
+                    {/* 14. মোট টাকা (সিট + মাল) */}
+                    <td className="px-2.5 py-2 border-r border-slate-300 text-right bg-emerald-50/60 tabular-nums whitespace-nowrap">
+                      <div className="font-black text-emerald-950 text-xs">{formatTaka(row.combinedFare)}</div>
+                    </td>
+
+                    {/* 15. সুপারভাইজার */}
                     <td className="px-2.5 py-2 border-r border-slate-300 font-semibold text-slate-800">
                       <div className="flex items-center gap-1">
                         <User className="w-3 h-3 text-slate-400 shrink-0" />
@@ -1111,7 +1187,7 @@ export const DatabasePage: React.FC = () => {
                       </div>
                     </td>
 
-                    {/* 14. ড্রাইভার */}
+                    {/* 16. ড্রাইভার */}
                     <td className="px-2.5 py-2 font-semibold text-slate-800">
                       <span>{row.driverDisplay}</span>
                     </td>
@@ -1139,8 +1215,14 @@ export const DatabasePage: React.FC = () => {
                   <td className="px-2.5 py-2.5 border-r border-slate-300 text-emerald-900">
                     {toBengaliDigits(filteredTotals.downSeats)} সিট | {formatTaka(filteredTotals.downFare)}
                   </td>
-                  <td className="px-2.5 py-2.5 border-r border-slate-300 text-emerald-950 font-black bg-amber-100">
-                    {toBengaliDigits(filteredTotals.totalSeats)} সিট | {formatTaka(filteredTotals.totalFare)}
+                  <td className="px-2.5 py-2.5 border-r border-slate-300 text-right text-blue-950 bg-blue-100/70 tabular-nums whitespace-nowrap">
+                    {formatTaka(filteredTotals.totalSeatFare)}
+                  </td>
+                  <td className="px-2.5 py-2.5 border-r border-slate-300 text-right text-amber-950 bg-amber-100/70 tabular-nums whitespace-nowrap">
+                    {formatTaka(filteredTotals.totalCargoFare)}
+                  </td>
+                  <td className="px-2.5 py-2.5 border-r border-slate-300 text-right text-emerald-950 font-black bg-emerald-100 tabular-nums whitespace-nowrap">
+                    {formatTaka(filteredTotals.totalFare)}
                   </td>
                   <td colSpan={2} className="px-3 py-2.5 text-center text-[11px] text-slate-600">
                     সমন্বয় সম্পন্ন
@@ -1183,7 +1265,9 @@ export const DatabasePage: React.FC = () => {
               <th className="border border-slate-400 p-1 text-left">মোট দূরত্ব</th>
               <th className="border border-slate-400 p-1 text-left">আপ সিট ও ভাড়া</th>
               <th className="border border-slate-400 p-1 text-left">ডাউন সিট ও ভাড়া</th>
-              <th className="border border-slate-400 p-1 text-left font-black">মোট সিট ও ভাড়া</th>
+              <th className="border border-slate-400 p-1 text-right">সিট টাকা</th>
+              <th className="border border-slate-400 p-1 text-right">মালের ভাড়া</th>
+              <th className="border border-slate-400 p-1 text-right font-black">মোট টাকা</th>
               <th className="border border-slate-400 p-1 text-left">সুপারভাইজার</th>
               <th className="border border-slate-400 p-1 text-left">ড্রাইভার</th>
             </tr>
@@ -1206,7 +1290,9 @@ export const DatabasePage: React.FC = () => {
                 <td className="border border-slate-400 p-1 font-mono">{row.distanceKmDisplay}</td>
                 <td className="border border-slate-400 p-1">{row.upSeatsAndFare}</td>
                 <td className="border border-slate-400 p-1">{row.downSeatsAndFare}</td>
-                <td className="border border-slate-400 p-1 font-bold">{row.totalSeatsAndFare}</td>
+                <td className="border border-slate-400 p-1 text-right font-semibold tabular-nums">{formatTaka(row.combinedSeatFare)}</td>
+                <td className="border border-slate-400 p-1 text-right font-semibold tabular-nums">{formatTaka(row.combinedCargoFare)}</td>
+                <td className="border border-slate-400 p-1 text-right font-bold tabular-nums">{formatTaka(row.combinedFare)}</td>
                 <td className="border border-slate-400 p-1">{row.supervisorDisplay}</td>
                 <td className="border border-slate-400 p-1">{row.driverDisplay}</td>
               </tr>
@@ -1216,7 +1302,7 @@ export const DatabasePage: React.FC = () => {
               <td colSpan={3} className="border border-slate-400 p-1.5 text-left font-black">
                 সর্বমোট: {toBengaliDigits(filteredTotals.fullTrips)} টি পূর্ণাঙ্গ ট্রিপ
               </td>
-              <td colSpan={5} className="border border-slate-400 p-1.5 text-right font-black">
+              <td colSpan={6} className="border border-slate-400 p-1.5 text-right font-black">
                 মোট দূরত্ব: {toBengaliDigits(filteredTotals.distance)} কিমি
               </td>
               <td className="border border-slate-400 p-1.5 font-bold font-mono">
@@ -1225,8 +1311,14 @@ export const DatabasePage: React.FC = () => {
               <td className="border border-slate-400 p-1.5 font-bold font-mono">
                 {toBengaliDigits(filteredTotals.downSeats)} সিট | {formatTaka(filteredTotals.downFare)}
               </td>
-              <td className="border border-slate-400 p-1.5 font-black font-mono">
-                {toBengaliDigits(filteredTotals.totalSeats)} সিট | {formatTaka(filteredTotals.totalFare)}
+              <td className="border border-slate-400 p-1.5 text-right font-bold font-mono tabular-nums">
+                {formatTaka(filteredTotals.totalSeatFare)}
+              </td>
+              <td className="border border-slate-400 p-1.5 text-right font-bold font-mono tabular-nums">
+                {formatTaka(filteredTotals.totalCargoFare)}
+              </td>
+              <td className="border border-slate-400 p-1.5 text-right font-black font-mono tabular-nums">
+                {formatTaka(filteredTotals.totalFare)}
               </td>
               <td colSpan={2} className="border border-slate-400 p-1.5 text-center text-[9px]">
                 অডিট সম্পন্ন

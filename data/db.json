@@ -56,6 +56,17 @@
       "entityType": "USER",
       "entityId": "usr-01",
       "details": "Zayem Bhuiya / জায়িম ভুইয়া (মাস্টার এডমিন) (super_admin) সফলভাবে সিস্টেমে প্রবেশ করেছেন।",
+      "id": "aud-1795573919178-57",
+      "timestamp": "2026-11-25T02:31:59.178Z"
+    },
+    {
+      "userId": "usr-01",
+      "userName": "Zayem Bhuiya / জায়িম ভুইয়া (মাস্টার এডমিন)",
+      "role": "super_admin",
+      "actionType": "LOGIN",
+      "entityType": "USER",
+      "entityId": "usr-01",
+      "details": "Zayem Bhuiya / জায়িম ভুইয়া (মাস্টার এডমিন) (super_admin) সফলভাবে সিস্টেমে প্রবেশ করেছেন।",
       "id": "aud-1795548599000-898",
       "timestamp": "2026-11-24T19:29:59.000Z"
     }

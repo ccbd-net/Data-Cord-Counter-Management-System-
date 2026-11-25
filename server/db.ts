@@ -340,6 +340,13 @@ class Database {
   public updateRoute(id: string, data: Partial<RouteItem>) {
     const route = this.data.routes.find((r) => r.id === id);
     if (!route) throw new Error('রুট খুঁজে পাওয়া যায়নি!');
+    if (data.routeNumber !== undefined) {
+      const parsedNum = Number(data.routeNumber);
+      route.routeNumber =
+        data.routeNumber !== null && String(data.routeNumber).trim() !== '' && !isNaN(parsedNum) && parsedNum > 0
+          ? parsedNum
+          : undefined;
+    }
     if (data.name) route.name = data.name.trim();
     if (data.origin) route.origin = data.origin.trim();
     if (data.destination) route.destination = data.destination.trim();
@@ -348,6 +355,15 @@ class Database {
     if (data.baseFare !== undefined) route.baseFare = data.baseFare;
     if (data.distanceKm !== undefined) route.distanceKm = data.distanceKm;
     if (data.status) route.status = data.status;
+
+    // Keep linked schedules in sync with routeNumber & routeName
+    this.data.schedules.forEach((s) => {
+      if (s.routeId === id) {
+        if (data.routeNumber !== undefined) s.routeNumber = route.routeNumber;
+        if (data.name) s.routeName = route.name;
+      }
+    });
+
     this.save();
     return route;
   }
@@ -554,7 +570,7 @@ class Database {
     return entry;
   }
 
-  // ATOMIC SEAT BOOKING with Race-Condition Protection
+  // ATOMIC SEAT BOOKING with Race-Condition Protection & Optional Cargo Fare
   public atomicBookSeats(params: {
     scheduleId: string;
     counterId: string;
@@ -565,6 +581,8 @@ class Database {
     boardingPoint: string;
     destination: string;
     seatNumbers: string[];
+    seatFare?: number;
+    cargoFare?: number;
     customTotalFare?: number;
     customFarePerSeat?: number;
   }): { booking: Booking; schedule: Schedule } {
@@ -578,31 +596,40 @@ class Database {
       throw new Error('এই ট্রিপটি বাতিল করা হয়েছে!');
     }
 
+    const cargoFare = Math.max(0, Number(params.cargoFare) || 0);
+    const seatList = Array.isArray(params.seatNumbers) ? params.seatNumbers : [];
+
+    if (seatList.length === 0 && cargoFare <= 0) {
+      throw new Error('কমপক্ষে একটি সিট অথবা মালের ভাড়া প্রদান করুন।');
+    }
+
     // 1. Validate seats against vehicle layout
-    const validSeats = generateValidSeatList(schedule.seatCapacity);
-    for (const seat of params.seatNumbers) {
-      if (!validSeats.includes(seat)) {
-        throw new Error(`অবৈধ সিট নম্বর: ${seat}। এই গাড়িতে এই সিটটি নেই।`);
+    if (seatList.length > 0) {
+      const validSeats = generateValidSeatList(schedule.seatCapacity);
+      for (const seat of seatList) {
+        if (!validSeats.includes(seat)) {
+          throw new Error(`অবৈধ সিট নম্বর: ${seat}। এই গাড়িতে এই সিটটি নেই।`);
+        }
       }
-    }
 
-    // 2. Check collision with existing active bookings for this schedule
-    const activeBookings = this.data.bookings.filter(
-      (b) => b.scheduleId === params.scheduleId && b.status === 'booked'
-    );
-
-    const alreadyBookedSeats = new Set<string>();
-    for (const b of activeBookings) {
-      for (const s of b.seatNumbers) {
-        alreadyBookedSeats.add(s);
-      }
-    }
-
-    const collidingSeats = params.seatNumbers.filter((s) => alreadyBookedSeats.has(s));
-    if (collidingSeats.length > 0) {
-      throw new Error(
-        `দুঃখিত! সিট ${collidingSeats.join(', ')} ইতিমধ্যেই অন্য কাউন্টার বা গ্রাহক দ্বারা বুক করা হয়েছে!`
+      // 2. Check collision with existing active bookings for this schedule
+      const activeBookings = this.data.bookings.filter(
+        (b) => b.scheduleId === params.scheduleId && b.status === 'booked'
       );
+
+      const alreadyBookedSeats = new Set<string>();
+      for (const b of activeBookings) {
+        for (const s of b.seatNumbers) {
+          alreadyBookedSeats.add(s);
+        }
+      }
+
+      const collidingSeats = seatList.filter((s) => alreadyBookedSeats.has(s));
+      if (collidingSeats.length > 0) {
+        throw new Error(
+          `দুঃখিত! সিট ${collidingSeats.join(', ')} ইতিমধ্যেই অন্য কাউন্টার বা গ্রাহক দ্বারা বুক করা হয়েছে!`
+        );
+      }
     }
 
     // 3. Find Counter
@@ -611,20 +638,28 @@ class Database {
       throw new Error('কাউন্টার সনাক্ত করা যায়নি!');
     }
 
-    // 4. Calculate Fare (Supports manual fare set by counter manager)
-    let totalFare: number;
-    let farePerSeat: number;
+    // 4. Calculate Seat Fare + Cargo Fare = Total Fare (Supports manual fare & cargo-only)
+    let seatFare = 0;
+    let farePerSeat = 0;
 
-    if (params.customTotalFare !== undefined && params.customTotalFare !== null && !isNaN(Number(params.customTotalFare))) {
-      totalFare = Math.max(0, Number(params.customTotalFare));
-      farePerSeat = params.seatNumbers.length > 0 ? Math.round(totalFare / params.seatNumbers.length) : totalFare;
+    if (seatList.length === 0) {
+      seatFare = 0;
+      farePerSeat = 0;
+    } else if (params.seatFare !== undefined && params.seatFare !== null && !isNaN(Number(params.seatFare))) {
+      seatFare = Math.max(0, Number(params.seatFare));
+      farePerSeat = Math.round(seatFare / seatList.length);
     } else if (params.customFarePerSeat !== undefined && params.customFarePerSeat !== null && !isNaN(Number(params.customFarePerSeat))) {
       farePerSeat = Math.max(0, Number(params.customFarePerSeat));
-      totalFare = farePerSeat * params.seatNumbers.length;
+      seatFare = farePerSeat * seatList.length;
+    } else if (params.customTotalFare !== undefined && params.customTotalFare !== null && !isNaN(Number(params.customTotalFare))) {
+      seatFare = Math.max(0, Number(params.customTotalFare) - cargoFare);
+      farePerSeat = Math.round(seatFare / seatList.length);
     } else {
       farePerSeat = schedule.fare || 0;
-      totalFare = farePerSeat * params.seatNumbers.length;
+      seatFare = farePerSeat * seatList.length;
     }
+
+    const totalFare = seatFare + cargoFare;
 
     // 5. Generate Ticket Number
     const dateNum = schedule.date.replace(/-/g, '');
@@ -652,9 +687,11 @@ class Database {
       passengerPhone: params.passengerPhone || '',
       boardingPoint: params.boardingPoint || counter.name,
       destination: params.destination || (schedule.direction === 'UP' ? 'ঢাকা' : 'মাদারীপুর'),
-      seatNumbers: params.seatNumbers,
-      totalSeats: params.seatNumbers.length,
+      seatNumbers: seatList,
+      totalSeats: seatList.length,
       farePerSeat,
+      seatFare,
+      cargoFare,
       totalFare,
       status: 'booked',
       bookedAt: new Date().toISOString(),
@@ -663,8 +700,15 @@ class Database {
 
     // 6. Commit booking and update schedule aggregate
     this.data.bookings.push(newBooking);
-    schedule.totalBookedSeats = (schedule.totalBookedSeats || 0) + params.seatNumbers.length;
-    schedule.totalCollection = (schedule.totalCollection || 0) + totalFare;
+    schedule.totalBookedSeats = (schedule.totalBookedSeats || 0) + seatList.length;
+    const prevSeatCollection =
+      schedule.totalSeatCollection !== undefined
+        ? schedule.totalSeatCollection
+        : Math.max(0, (schedule.totalCollection || 0) - (schedule.totalCargoCollection || 0));
+    const prevCargoCollection = schedule.totalCargoCollection || 0;
+    schedule.totalSeatCollection = prevSeatCollection + seatFare;
+    schedule.totalCargoCollection = prevCargoCollection + cargoFare;
+    schedule.totalCollection = schedule.totalSeatCollection + schedule.totalCargoCollection;
 
     this.logAudit({
       userId: params.bookedByUserId,
@@ -674,10 +718,10 @@ class Database {
       entityType: 'BOOKING',
       entityId: newBooking.id,
       tripIdAffected: schedule.id,
-      details: `${counter.name} থেকে টিকিট নং ${ticketNo} এর অধীনে সিট ${params.seatNumbers.join(
-        ', '
-      )} সফলভাবে বুক করা হয়েছে। মোট ভাড়া: ৳${totalFare}`,
-      newValues: { ticketNo, seats: params.seatNumbers, totalFare },
+      details: `${counter.name} থেকে টিকিট নং ${ticketNo} (${
+        seatList.length > 0 ? `সিট: ${seatList.join(', ')}` : 'মালামাল বুকিং'
+      }) বুক করা হয়েছে। সিট ভাড়া: ৳${seatFare}, মালের ভাড়া: ৳${cargoFare}, মোট: ৳${totalFare}`,
+      newValues: { ticketNo, seats: seatList, seatFare, cargoFare, totalFare },
     });
 
     this.save();
@@ -695,10 +739,23 @@ class Database {
     }
 
     booking.status = 'cancelled';
+    const cargo = Math.max(0, Number(booking.cargoFare) || 0);
+    const seat =
+      booking.seatFare !== undefined && booking.seatFare !== null && !isNaN(Number(booking.seatFare))
+        ? Math.max(0, Number(booking.seatFare))
+        : Math.max(0, (booking.totalFare || 0) - cargo);
+
     const schedule = this.data.schedules.find((s) => s.id === booking.scheduleId);
     if (schedule) {
       schedule.totalBookedSeats = Math.max(0, (schedule.totalBookedSeats || 0) - booking.totalSeats);
-      schedule.totalCollection = Math.max(0, (schedule.totalCollection || 0) - booking.totalFare);
+      const prevSeatCollection =
+        schedule.totalSeatCollection !== undefined
+          ? schedule.totalSeatCollection
+          : Math.max(0, (schedule.totalCollection || 0) - (schedule.totalCargoCollection || 0));
+      const prevCargoCollection = schedule.totalCargoCollection || 0;
+      schedule.totalSeatCollection = Math.max(0, prevSeatCollection - seat);
+      schedule.totalCargoCollection = Math.max(0, prevCargoCollection - cargo);
+      schedule.totalCollection = schedule.totalSeatCollection + schedule.totalCargoCollection;
     }
 
     this.logAudit({
@@ -709,10 +766,10 @@ class Database {
       entityType: 'BOOKING',
       entityId: booking.id,
       tripIdAffected: booking.scheduleId,
-      details: `টিকিট নং ${booking.ticketNo} (সিট: ${booking.seatNumbers.join(
-        ', '
-      )}) বাতিল করা হয়েছে। রিফান্ড পরিমাণ: ৳${booking.totalFare}`,
-      previousValues: { status: 'booked', seats: booking.seatNumbers },
+      details: `টিকিট নং ${booking.ticketNo} (${
+        booking.seatNumbers.length > 0 ? `সিট: ${booking.seatNumbers.join(', ')}` : 'মালামাল বুকিং'
+      }) বাতিল করা হয়েছে। রিফান্ড পরিমাণ: ৳${booking.totalFare}`,
+      previousValues: { status: 'booked', seats: booking.seatNumbers, seatFare: seat, cargoFare: cargo },
       newValues: { status: 'cancelled' },
     });
 

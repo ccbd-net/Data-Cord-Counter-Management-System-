@@ -3,6 +3,7 @@ import type { Booking } from '../types/index.ts';
 import { useAuth } from '../context/AuthContext.tsx';
 import { formatTaka, toBengaliDigits, formatBengaliDateTime } from '../utils/formatters.ts';
 import { api } from '../services/api.ts';
+import { getBookingFareParts } from '../utils/routeSort.ts';
 import { downloadElementAsPDF, openPrintWindow } from '../utils/pdfGenerator.ts';
 import {
   PrinterSettingsModal,
@@ -215,43 +216,58 @@ export const ThermalTicketModal: React.FC<ThermalTicketModalProps> = ({
         </div>
 
         {/* Section 3: Seat Numbers & Financials Box (Highlighted) */}
-        <div style={{
-          border: '2px solid #000000',
-          borderRadius: '5px',
-          padding: '6px 8px',
-          marginBottom: '6px',
-          backgroundColor: '#f8fafc',
-          textAlign: 'center'
-        }}>
-          <div style={{ fontSize: '10px', color: '#475569', fontWeight: 700, textTransform: 'uppercase' }}>
-            আসন নম্বর সমূহ (SEATS)
-          </div>
-          <div style={{ fontSize: '17px', fontWeight: 900, letterSpacing: '1.5px', color: '#000000', margin: '2px 0' }}>
-            {booking.seatNumbers.join(', ')}
-          </div>
-          <div style={{ fontSize: '10.5px', color: '#1e293b', borderBottom: '1px dotted #000000', paddingBottom: '3px', marginBottom: '4px' }}>
-            মোট আসন: <strong style={{ fontWeight: 900 }}>{toBengaliDigits(booking.totalSeats)} টি</strong>
-          </div>
+        {(() => {
+          const fareParts = getBookingFareParts(booking);
+          return (
+            <div style={{
+              border: '2px solid #000000',
+              borderRadius: '5px',
+              padding: '6px 8px',
+              marginBottom: '6px',
+              backgroundColor: '#f8fafc',
+              textAlign: 'center'
+            }}>
+              <div style={{ fontSize: '10px', color: '#475569', fontWeight: 700, textTransform: 'uppercase' }}>
+                {booking.seatNumbers.length > 0 ? 'আসন নম্বর সমূহ (SEATS)' : 'বুকিং ধরন'}
+              </div>
+              <div style={{ fontSize: booking.seatNumbers.length > 0 ? '17px' : '14px', fontWeight: 900, letterSpacing: '1px', color: '#000000', margin: '2px 0' }}>
+                {booking.seatNumbers.length > 0 ? booking.seatNumbers.join(', ') : 'মালামাল বুকিং (আসনবিহীন)'}
+              </div>
+              <div style={{ fontSize: '10.5px', color: '#1e293b', borderBottom: '1px dotted #000000', paddingBottom: '3px', marginBottom: '4px' }}>
+                {booking.seatNumbers.length > 0 ? (
+                  <>মোট আসন: <strong style={{ fontWeight: 900 }}>{toBengaliDigits(booking.totalSeats)} টি</strong></>
+                ) : (
+                  <>শুধুমাত্র মালের ভাড়া রসিদ</>
+                )}
+              </div>
 
-          <table className="receipt-table" style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed' }}>
-            <tbody>
-              <tr>
-                <td className="lbl" style={{ width: '44%', textAlign: 'left', color: '#1e293b', padding: '2px 0', fontSize: '11px', whiteSpace: 'nowrap' }}>ভাড়া (প্রতি সিট):</td>
-                <td className="val" style={{ width: '56%', textAlign: 'right', fontWeight: 700, color: '#000000', padding: '2px 0', fontSize: '11px' }}>
-                  {formatTaka(booking.farePerSeat || booking.totalFare / (booking.totalSeats || 1))}
-                </td>
-              </tr>
-              <tr style={{ borderTop: '1.5px solid #000000' }}>
-                <td className="lbl" style={{ width: '44%', textAlign: 'left', fontWeight: 900, color: '#000000', paddingTop: '4px', fontSize: '12px', whiteSpace: 'nowrap' }}>
-                  সর্বমোট পরিশোধিত:
-                </td>
-                <td className="val" style={{ width: '56%', textAlign: 'right', fontWeight: 900, color: '#000000', paddingTop: '4px', fontSize: '13.5px' }}>
-                  {formatTaka(booking.totalFare)}
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
+              <table className="receipt-table" style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed' }}>
+                <tbody>
+                  <tr>
+                    <td className="lbl" style={{ width: '48%', textAlign: 'left', color: '#1e293b', padding: '2px 0', fontSize: '11px', whiteSpace: 'nowrap' }}>সিট ভাড়া:</td>
+                    <td className="val" style={{ width: '52%', textAlign: 'right', fontWeight: 700, color: '#000000', padding: '2px 0', fontSize: '11px' }}>
+                      {formatTaka(fareParts.seatFare)}
+                    </td>
+                  </tr>
+                  <tr>
+                    <td className="lbl" style={{ width: '48%', textAlign: 'left', color: '#1e293b', padding: '2px 0', fontSize: '11px', whiteSpace: 'nowrap' }}>মালের ভাড়া:</td>
+                    <td className="val" style={{ width: '52%', textAlign: 'right', fontWeight: 700, color: '#000000', padding: '2px 0', fontSize: '11px' }}>
+                      {formatTaka(fareParts.cargoFare)}
+                    </td>
+                  </tr>
+                  <tr style={{ borderTop: '1.5px solid #000000' }}>
+                    <td className="lbl" style={{ width: '48%', textAlign: 'left', fontWeight: 900, color: '#000000', paddingTop: '4px', fontSize: '11.5px', whiteSpace: 'nowrap' }}>
+                      মোট টাকা (সিট+মাল):
+                    </td>
+                    <td className="val" style={{ width: '52%', textAlign: 'right', fontWeight: 900, color: '#000000', paddingTop: '4px', fontSize: '13.5px' }}>
+                      {formatTaka(fareParts.totalFare)}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          );
+        })()}
 
         {/* Section 4: Counter Info & Verification */}
         <div style={{

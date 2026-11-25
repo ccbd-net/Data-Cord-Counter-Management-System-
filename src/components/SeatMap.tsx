@@ -46,12 +46,12 @@ export const SeatMap: React.FC<SeatMapProps> = ({
   const rearRowLetter = seatCapacity === 42 ? 'J' : 'K';
   const rearRowSeats = [`${rearRowLetter}1`, `${rearRowLetter}2`, `${rearRowLetter}3`, `${rearRowLetter}4`, `${rearRowLetter}5`];
 
-  const renderSeat = (seatId: string, label?: string) => {
+  const renderSeat = (seatId: string, label?: string, isRear: boolean = false) => {
     const isBookedInfo = seatBookingMap.get(seatId);
     const isBooked = Boolean(isBookedInfo);
     const isSelected = selectedSeats.includes(seatId);
 
-    let bgColor = 'bg-white hover:bg-emerald-50 text-slate-700 border-slate-300 shadow-sm';
+    let bgColor = 'bg-white hover:bg-emerald-50 text-slate-800 border-slate-300 shadow-sm';
     let borderColor = 'border-slate-300';
     let customStyle: React.CSSProperties = {};
 
@@ -77,66 +77,68 @@ export const SeatMap: React.FC<SeatMapProps> = ({
         disabled={isBooked || readOnly}
         onClick={() => !readOnly && !isBooked && onSeatToggle(seatId)}
         style={customStyle}
-        className={`relative flex flex-col items-center justify-center w-11 h-12 rounded-lg border text-xs transition-all duration-150 ${bgColor} ${borderColor} ${
-          isBooked ? 'opacity-90' : 'cursor-pointer hover:border-emerald-400'
+        className={`relative flex flex-col items-center justify-center ${
+          isRear ? 'flex-1 h-[54px] sm:h-[60px]' : 'w-[54px] h-[54px] sm:w-[64px] sm:h-[60px]'
+        } rounded-xl border text-xs sm:text-sm transition-all duration-150 ${bgColor} ${borderColor} ${
+          isBooked ? 'opacity-95' : 'cursor-pointer hover:border-emerald-400'
         }`}
       >
-        <span className="text-[11px] font-bold tracking-tight">{label || seatId}</span>
+        <span className="text-xs sm:text-sm font-extrabold tracking-tight leading-none">{label || seatId}</span>
         {/* Seat cushion visual outline */}
-        <div className={`w-7 h-1 mt-0.5 rounded-full ${isBooked || isSelected ? 'bg-white/40' : 'bg-slate-200'}`} />
+        <div className={`w-8 sm:w-9 h-1.5 mt-1 rounded-full ${isBooked || isSelected ? 'bg-white/45' : 'bg-slate-200'}`} />
       </button>
     );
   };
 
   return (
-    <div className="flex flex-col items-center">
+    <div className="flex flex-col items-center w-full">
       {/* Bus Container */}
-      <div className="w-full max-w-[340px] bg-slate-100 rounded-3xl p-5 border-2 border-slate-300 shadow-inner relative">
+      <div className="w-full max-w-[440px] bg-slate-100 rounded-3xl p-4 sm:p-5 border-2 border-slate-300 shadow-inner relative">
         {/* Front Cabin: Driver on Right, EX-1 on Left directly in front of A1 */}
-        <div className="flex items-center justify-between pb-3 border-b-2 border-slate-300 mb-3 px-1">
+        <div className="flex items-center justify-between pb-3.5 border-b-2 border-slate-300 mb-3.5 px-1">
           {/* Left: EX-1 directly aligned in front of A1 seat */}
           <div className="flex items-center gap-2">
             <div>
-              <div className="text-[9px] text-slate-500 font-bold mb-0.5 text-center">A1 এর সামনে</div>
+              <div className="text-[10px] text-slate-500 font-bold mb-1 text-center">A1 এর সামনে</div>
               {renderSeat('EX-1', 'EX-1')}
             </div>
           </div>
 
           {/* Central Aisle label */}
-          <div className="w-6 text-center text-[10px] text-blue-700 font-bold bg-blue-50 px-1 py-0.5 rounded border border-blue-200">
+          <div className="text-center text-[11px] text-blue-700 font-bold bg-blue-50 px-2 py-1 rounded-lg border border-blue-200">
             সামনে
           </div>
 
           {/* Right: Driver Indicator */}
-          <div className="flex flex-col items-center justify-center w-24 h-12 bg-slate-800 text-white rounded-xl shadow-xs">
-            <div className="flex items-center gap-1.5 text-xs font-bold">
+          <div className="flex flex-col items-center justify-center w-28 sm:w-32 h-[54px] sm:h-[60px] bg-slate-800 text-white rounded-xl shadow-xs">
+            <div className="flex items-center gap-1.5 text-xs sm:text-sm font-bold">
               <span>চালক</span>
               <svg className="w-4 h-4 text-emerald-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
                 <circle cx="12" cy="12" r="9" />
                 <path d="M12 3v18M3 12h18" />
               </svg>
             </div>
-            <span className="text-[9px] text-slate-300">Driver Cabin</span>
+            <span className="text-[10px] text-slate-300">Driver Cabin</span>
           </div>
         </div>
 
         {/* Standard Rows (2 Left - Aisle - 2 Right) */}
-        <div className="space-y-2.5">
+        <div className="space-y-3">
           {standardRowLetters.map((row) => (
-            <div key={row} className="flex items-center justify-between">
+            <div key={row} className="flex items-center justify-between gap-2">
               {/* Left Side: 2 Seats */}
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 sm:gap-2.5">
                 {renderSeat(`${row}1`)}
                 {renderSeat(`${row}2`)}
               </div>
 
               {/* Central Aisle */}
-              <div className="w-6 text-center text-[10px] text-slate-400 font-mono select-none">
+              <div className="w-6 text-center text-xs text-slate-400 font-bold font-mono select-none">
                 {row}
               </div>
 
               {/* Right Side: 2 Seats */}
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 sm:gap-2.5">
                 {renderSeat(`${row}3`)}
                 {renderSeat(`${row}4`)}
               </div>
@@ -145,16 +147,16 @@ export const SeatMap: React.FC<SeatMapProps> = ({
         </div>
 
         {/* Rear Row: 5 Seats */}
-        <div className="mt-4 pt-3 border-t border-slate-300">
-          <div className="text-[10px] text-center text-slate-400 mb-1 font-medium">পেছনের শেষ সারি ({rearRowLetter})</div>
-          <div className="flex items-center justify-between gap-1">
-            {rearRowSeats.map((seatId) => renderSeat(seatId))}
+        <div className="mt-4 pt-3.5 border-t border-slate-300">
+          <div className="text-[11px] text-center text-slate-500 mb-1.5 font-semibold">পেছনের শেষ সারি ({rearRowLetter})</div>
+          <div className="flex items-center justify-between gap-1.5 sm:gap-2">
+            {rearRowSeats.map((seatId) => renderSeat(seatId, seatId, true))}
           </div>
         </div>
       </div>
 
       {/* Seat Status Summary & Color Legend */}
-      <div className="w-full max-w-md mt-5 p-4 bg-white rounded-2xl border border-slate-200 shadow-sm">
+      <div className="w-full max-w-[440px] mt-5 p-4 bg-white rounded-2xl border border-slate-200 shadow-sm">
         <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-2.5 border-b pb-1.5 flex items-center justify-between">
           <span>সিট স্ট্যাটাস ও কাউন্টার কালার লিজেন্ড</span>
           <span className="text-[11px] text-slate-500 font-normal">

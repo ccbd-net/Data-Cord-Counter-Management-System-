@@ -809,6 +809,44 @@ export const api = {
     return result;
   },
 
+  async forwardUpSchedules(data: {
+    sourceDate: string;
+    targetDate: string;
+    scheduleIds?: string[];
+  }): Promise<{
+    success: boolean;
+    createdSchedules: Schedule[];
+    createdCount: number;
+    skippedCount: number;
+  }> {
+    const activeCompanyId = localStorage.getItem('zb_active_company_id');
+    const res = await fetchWithAutoRehydrate(`${API_BASE}/schedules/forward-up`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
+      body: JSON.stringify(data),
+    });
+    const result = await handleResponse<{
+      success: boolean;
+      createdSchedules: Schedule[];
+      createdCount: number;
+      skippedCount: number;
+    }>(res);
+    if (result.success && result.createdSchedules && result.createdSchedules.length > 0) {
+      const existing = await browserDb.getSchedules(activeCompanyId);
+      const createdIds = new Set(result.createdSchedules.map((s) => s.id));
+      await browserDb.saveSchedules(
+        [...existing.filter((s) => !createdIds.has(s.id)), ...result.createdSchedules],
+        activeCompanyId
+      );
+      await api.syncVaultSnapshot({ force: true });
+      browserDb.broadcastSync({
+        type: 'SCHEDULE_CREATED',
+        companyId: activeCompanyId,
+      });
+    }
+    return result;
+  },
+
   // Trip Database & Reports
   async getTripDatabaseReport(params?: {
     startDate?: string;
@@ -832,6 +870,8 @@ export const api = {
       supervisor: string;
       supervisorPhone: string;
       bookedSeatsCount: number;
+      seatAmount?: number;
+      cargoAmount?: number;
       totalAmount: number;
       fare: number;
       isNightHold: boolean;
@@ -840,6 +880,8 @@ export const api = {
     summary: {
       totalTrips: number;
       totalSeats: number;
+      totalSeatAmount?: number;
+      totalCargoAmount?: number;
       totalAmount: number;
     };
   }> {
@@ -866,6 +908,8 @@ export const api = {
     boardingPoint: string;
     destination: string;
     seatNumbers: string[];
+    seatFare?: number;
+    cargoFare?: number;
     manualFare?: number;
     totalFare?: number;
     farePerSeat?: number;
