@@ -50,7 +50,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   isOpen,
   onCloseMobile,
 }) => {
-  const { user, isSuperAdmin, isCompanyAdmin, isMasterAdmin, isModerator, isMasterBookingCounter, canManageTrips } = useAuth();
+  const { user, isSuperAdmin, isCompanyAdmin, isMasterAdmin, isModerator, isMasterBookingCounter, isFuelManager, isChecker, canManageFuel, canManageTrips } = useAuth();
 
   const navItems: Array<{
     id: NavTab;
@@ -60,16 +60,18 @@ export const Sidebar: React.FC<SidebarProps> = ({
     adminOnly?: boolean;
     superAdminOnly?: boolean;
     modOnly?: boolean;
+    fuelOnly?: boolean;
     tripManagerOnly?: boolean;
+    hideForFuelManager?: boolean;
   }> = [
     { id: 'dashboard', label: 'ড্যাশবোর্ড', icon: LayoutDashboard },
     { id: 'company_admin', label: 'কোম্পানি ও সাবস্ক্রিপশন', icon: Building2, superAdminOnly: true, badge: 'সুপার এডমিন' },
-    { id: 'seat_booking', label: 'সিট বুকিং', icon: Armchair, badge: 'লাইভ' },
-    { id: 'ticket_print', label: 'টিকিট প্রিন্ট', icon: Printer },
+    { id: 'seat_booking', label: 'সিট বুকিং', icon: Armchair, badge: 'লাইভ', hideForFuelManager: true },
+    { id: 'ticket_print', label: 'টিকিট প্রিন্ট', icon: Printer, hideForFuelManager: true },
     { id: 'daily_schedules', label: 'দৈনিক ট্রিপ ও ফিরতি লগ', icon: CalendarDays, badge: 'ট্রিপ' },
     { id: 'schedule_maker', label: 'শিডিউল মেকার', icon: CalendarPlus, tripManagerOnly: true },
     { id: 'reconciliation', label: 'ট্রিপ হিসাব সমন্বয়', icon: Scale, modOnly: true },
-    { id: 'fuel_management', label: 'ফুয়েল লগ', icon: Fuel, modOnly: true },
+    { id: 'fuel_management', label: 'ফুয়েল লগ', icon: Fuel, fuelOnly: true },
     { id: 'counters', label: 'কাউন্টার ব্যবস্থাপনা', icon: Layers, modOnly: true },
     { id: 'vehicles', label: 'গাড়ি ব্যবস্থাপনা', icon: Bus, modOnly: true },
     { id: 'routes', label: 'রুট ব্যবস্থাপনা', icon: MapPin, tripManagerOnly: true },
@@ -82,7 +84,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
     if (item.superAdminOnly && !isSuperAdmin) return false;
     if (item.adminOnly && !isMasterAdmin) return false;
     if (item.tripManagerOnly && !canManageTrips) return false;
+    if (item.fuelOnly && !canManageFuel) return false;
     if (item.modOnly && !isModerator) return false;
+    if (item.hideForFuelManager && isFuelManager) return false;
     return true;
   });
 
@@ -108,17 +112,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
         {/* Brand Header */}
         <div className="p-3.5 border-b border-slate-800 flex items-center justify-between">
           <div className="flex items-center gap-2.5 min-w-0">
-            {companyLogo ? (
-              <img
-                src={companyLogo}
-                alt={displayName}
-                className="w-10 h-10 rounded-xl object-cover shadow-md border border-slate-700/80 shrink-0 bg-white"
-              />
-            ) : (
-              <div className="w-10 h-10 rounded-xl bg-slate-800 border border-slate-700 flex items-center justify-center shrink-0 text-emerald-400 shadow-inner">
-                <Bus className="w-5 h-5" />
-              </div>
-            )}
+            <img
+              src={companyLogo || '/assets/aistudio/1795612353186_f79fafda.jpg'}
+              alt={displayName}
+              className="w-10 h-10 rounded-xl object-cover shadow-md border border-emerald-500/40 shrink-0 bg-slate-900"
+            />
             <div className="min-w-0">
               <div className="font-bold text-white text-xs leading-tight tracking-wide truncate">
                 {displayName}
@@ -144,12 +142,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-700 text-slate-300 font-semibold shrink-0">
             {isSuperAdmin
               ? 'সুপার এডমিন'
-              : isCompanyAdmin
-              ? 'কোম্পানি এডমিন'
-              : user?.role === 'master_admin'
-              ? 'এডমিন'
+              : isCompanyAdmin || user?.role === 'master_admin'
+              ? 'মাস্টার এডমিন'
               : user?.role === 'moderator'
               ? 'ম্যানেজার'
+              : isFuelManager
+              ? 'ফুয়েল ম্যানেজার'
+              : isChecker
+              ? 'চেকার'
               : isMasterBookingCounter
               ? 'মাষ্টার কাউন্টার'
               : 'কাউন্টার'}

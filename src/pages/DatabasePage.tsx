@@ -1,13 +1,20 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useAuth } from '../context/AuthContext.tsx';
 import { api } from '../services/api.ts';
-import type { Schedule, Vehicle, RouteItem } from '../types/index.ts';
+import type { Schedule, Vehicle, RouteItem, FuelEntry, FuelSettings } from '../types/index.ts';
 import {
   formatTaka,
   toBengaliDigits,
   getTodayDhakaDate,
   formatBengaliDate,
 } from '../utils/formatters.ts';
+import { downloadElementAsPDF, printElementById } from '../utils/pdfGenerator.ts';
+import {
+  formatSignedFuelCostDiff,
+  normalizeRegNo,
+  type OwnerReportSummaryItem,
+} from '../utils/whatsapp.ts';
+import { OwnerWhatsAppModal } from '../components/OwnerWhatsAppModal.tsx';
 import {
   Database,
   Calendar,
@@ -16,17 +23,17 @@ import {
   User,
   Search,
   Printer,
+  Download,
   FileSpreadsheet,
   RefreshCw,
   Sparkles,
-  MapPin,
   CheckCircle2,
   Moon,
   Info,
   Route as RouteIcon,
-  ShieldCheck,
   TrendingUp,
   Award,
+  MessageCircle,
 } from 'lucide-react';
 
 export interface DatabaseRow {
@@ -37,6 +44,7 @@ export interface DatabaseRow {
   isNightHold: boolean;
   vehicleRegNo: string;
   vehicleOwnerName?: string;
+  vehicleOwnerPhone?: string;
   upTime: string;
   upTripNo?: string;
   downTime: string;
@@ -61,6 +69,9 @@ export interface DatabaseRow {
   combinedSeatFare: number;
   combinedCargoFare: number;
   combinedFare: number;
+  fuelExpectedCost: number;
+  fuelActualCost: number;
+  fuelCostDiff: number | null;
   supervisorDisplay: string;
   driverDisplay: string;
   isFullTrip: boolean; // True when UP + DOWN paired and completed
@@ -205,33 +216,43 @@ function getScheduleFareBreakdown(s?: Schedule): { seat: number; cargo: number; 
 }
 
 export const DatabasePage: React.FC = () => {
-  const { isMasterAdmin } = useAuth();
+  const { user, isMasterAdmin } = useAuth();
   const [date, setDate] = useState<string>(getTodayDhakaDate());
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [routes, setRoutes] = useState<RouteItem[]>([]);
+  const [fuelEntries, setFuelEntries] = useState<FuelEntry[]>([]);
+  const [fuelSettings, setFuelSettings] = useState<FuelSettings>({ commonMileage: 4, fuelPricePerLiter: 135.4 });
   const [loading, setLoading] = useState<boolean>(true);
   const [searchTerm, setSearchTerm] = useState<string>('');
   const [vehicleFilter, setVehicleFilter] = useState<string>('ALL');
   const [tripTypeFilter, setTripTypeFilter] = useState<'ALL' | 'FULL_TRIPS' | 'NIGHT_HOLD' | 'PENDING'>('ALL');
+  const [showWhatsAppModal, setShowWhatsAppModal] = useState<boolean>(false);
 
   // AI Insights State
   const [aiReport, setAiReport] = useState<string>('');
   const [aiLoading, setAiLoading] = useState<boolean>(false);
   const [showAiModal, setShowAiModal] = useState<boolean>(false);
 
-  // Load schedules, vehicles, and routes
+  // Load schedules, vehicles, routes, and fuel entries
   const fetchData = async () => {
     setLoading(true);
     try {
-      const [schRes, vehRes, routeRes] = await Promise.all([
+      const yesterday = getYesterdayDate(date);
+      const [schRes, vehRes, routeRes, fuelRes, fuelSettRes] = await Promise.all([
         api.getSchedules({ date }),
         api.getVehicles(),
         api.getRoutes(),
+        api.getFuelEntries({ startDate: yesterday, endDate: date }).catch(() => ({ entries: [] })),
+        api.getFuelSettings().catch(() => ({ settings: { commonMileage: 4, fuelPricePerLiter: 135.4 } })),
       ]);
       setSchedules(schRes.schedules || []);
       setVehicles(vehRes.vehicles || []);
       setRoutes(routeRes.routes || []);
+      setFuelEntries(fuelRes.entries || []);
+      if (fuelSettRes?.settings) {
+        setFuelSettings(fuelSettRes.settings);
+      }
     } catch (err) {
       console.error('Failed to load database records:', err);
     } finally {
@@ -256,6 +277,35 @@ export const DatabasePage: React.FC = () => {
     const rows: DatabaseRow[] = [];
     const yesterday = getYesterdayDate(date);
     const tomorrow = getTomorrowDate(date);
+
+    const vehicleByReg = new Map<string, Vehicle>();
+    vehicles.forEach((v) => {
+      vehicleByReg.set(normalizeRegNo(v.regNo), v);
+    });
+
+    const getFuelForVehicleOnDate = (vehReg: string, targetDate: string) => {
+      const normReg = normalizeRegNo(vehReg);
+      const matched = fuelEntries.filter(
+        (f) => normalizeRegNo(f.vehicleRegNo) === normReg && f.date === targetDate
+      );
+      if (matched.length === 0) {
+        return { expectedCost: 0, actualCost: 0, costDiff: null as number | null };
+      }
+      let expectedCost = 0;
+      let actualCost = 0;
+      matched.forEach((f) => {
+        const rate = Number(f.fuelRatePerLiter) || fuelSettings.fuelPricePerLiter || 135.4;
+        const exp =
+          f.expectedFuelCost !== undefined && f.expectedFuelCost !== null
+            ? Math.round(Number(f.expectedFuelCost))
+            : Math.round((Number(f.expectedFuelLiters) || 0) * rate);
+        const act =
+          Number(f.totalCost) || Math.round((Number(f.actualFuelLiters) || 0) * rate);
+        expectedCost += exp;
+        actualCost += act;
+      });
+      return { expectedCost, actualCost, costDiff: expectedCost - actualCost };
+    };
 
     // Group schedules by vehicle
     const vehicleGroups = new Map<string, {
@@ -367,7 +417,9 @@ export const DatabasePage: React.FC = () => {
           driverDisplay = upDrv || downDrv || '-';
         }
 
-        const owner = upTrip.vehicleOwnerName || downTrip?.vehicleOwnerName || 'সাধারণ';
+        const matchedVeh = vehicleByReg.get(normalizeRegNo(vehReg));
+        const owner = upTrip.vehicleOwnerName || downTrip?.vehicleOwnerName || matchedVeh?.ownerName || 'সাধারণ';
+        const fuelInfo = getFuelForVehicleOnDate(vehReg, date);
 
         rows.push({
           id: `row-nh-${autoSl}-${vehReg}`,
@@ -377,6 +429,7 @@ export const DatabasePage: React.FC = () => {
           isNightHold: true,
           vehicleRegNo: vehReg,
           vehicleOwnerName: owner,
+          vehicleOwnerPhone: matchedVeh?.ownerPhone,
           upTime,
           upTripNo: upTrip.tripNo,
           downTime,
@@ -401,6 +454,9 @@ export const DatabasePage: React.FC = () => {
           combinedSeatFare,
           combinedCargoFare,
           combinedFare,
+          fuelExpectedCost: fuelInfo.expectedCost,
+          fuelActualCost: fuelInfo.actualCost,
+          fuelCostDiff: fuelInfo.costDiff,
           supervisorDisplay,
           driverDisplay,
           isFullTrip,
@@ -474,7 +530,9 @@ export const DatabasePage: React.FC = () => {
           driverDisplay = upDrv || downDrv || '-';
         }
 
-        const owner = upTrip?.vehicleOwnerName || downTrip?.vehicleOwnerName || 'সাধারণ';
+        const matchedVeh = vehicleByReg.get(normalizeRegNo(vehReg));
+        const owner = upTrip?.vehicleOwnerName || downTrip?.vehicleOwnerName || matchedVeh?.ownerName || 'সাধারণ';
+        const fuelInfo = getFuelForVehicleOnDate(vehReg, date);
 
         rows.push({
           id: `row-reg-${autoSl}-${vehReg}-${i}`,
@@ -484,6 +542,7 @@ export const DatabasePage: React.FC = () => {
           isNightHold: false,
           vehicleRegNo: vehReg,
           vehicleOwnerName: owner,
+          vehicleOwnerPhone: matchedVeh?.ownerPhone,
           upTime,
           upTripNo: upTrip?.tripNo,
           downTime,
@@ -508,6 +567,9 @@ export const DatabasePage: React.FC = () => {
           combinedSeatFare,
           combinedCargoFare,
           combinedFare,
+          fuelExpectedCost: fuelInfo.expectedCost,
+          fuelActualCost: fuelInfo.actualCost,
+          fuelCostDiff: fuelInfo.costDiff,
           supervisorDisplay,
           driverDisplay,
           isFullTrip,
@@ -542,6 +604,9 @@ export const DatabasePage: React.FC = () => {
         const downSeatsAndFare = '-';
         const totalSeatsAndFare = `${toBengaliDigits(upBookedSeats)} সিট | ${formatTaka(upFares.total)}`;
 
+        const matchedVeh = vehicleByReg.get(normalizeRegNo(vehReg));
+        const fuelInfo = getFuelForVehicleOnDate(vehReg, date);
+
         rows.push({
           id: `row-today-nh-${autoSl}-${vehReg}`,
           autoSerial: autoSl++,
@@ -549,7 +614,8 @@ export const DatabasePage: React.FC = () => {
           operationalDate: date,
           isNightHold: true,
           vehicleRegNo: vehReg,
-          vehicleOwnerName: upTrip.vehicleOwnerName || 'সাধারণ',
+          vehicleOwnerName: upTrip.vehicleOwnerName || matchedVeh?.ownerName || 'সাধারণ',
+          vehicleOwnerPhone: matchedVeh?.ownerPhone,
           upTime,
           upTripNo: upTrip.tripNo,
           downTime,
@@ -574,6 +640,9 @@ export const DatabasePage: React.FC = () => {
           combinedSeatFare: upFares.seat,
           combinedCargoFare: upFares.cargo,
           combinedFare: upFares.total,
+          fuelExpectedCost: fuelInfo.expectedCost,
+          fuelActualCost: fuelInfo.actualCost,
+          fuelCostDiff: fuelInfo.costDiff,
           supervisorDisplay: upTrip.supervisor || '-',
           driverDisplay: upTrip.driver || '-',
           isFullTrip: false, // Counts on tomorrow's date!
@@ -583,7 +652,7 @@ export const DatabasePage: React.FC = () => {
     });
 
     return rows;
-  }, [schedules, routes, date]);
+  }, [schedules, routes, vehicles, fuelEntries, fuelSettings.fuelPricePerLiter, date]);
 
   // Client Filtered Rows
   const filteredRows = tableRows.filter((row) => {
@@ -640,6 +709,10 @@ export const DatabasePage: React.FC = () => {
         acc.totalSeatFare += r.combinedSeatFare;
         acc.totalCargoFare += r.combinedCargoFare;
         acc.totalFare += r.combinedFare;
+        if (r.fuelCostDiff !== null) {
+          acc.fuelDiff += r.fuelCostDiff;
+          acc.hasFuelData = true;
+        }
         return acc;
       },
       {
@@ -653,11 +726,81 @@ export const DatabasePage: React.FC = () => {
         totalSeatFare: 0,
         totalCargoFare: 0,
         totalFare: 0,
+        fuelDiff: 0,
+        hasFuelData: false,
       }
     );
   }, [filteredRows]);
 
-  // Export CSV with UTF-8 BOM containing Seat + Cargo + Total columns
+  const whatsappOwnerItems: OwnerReportSummaryItem[] = useMemo(() => {
+    const grouped = new Map<
+      string,
+      {
+        ownerName: string;
+        ownerPhone: string;
+        vehicles: Set<string>;
+        tripCount: number;
+        bookedSeats: number;
+        seatFare: number;
+        cargoFare: number;
+        totalFare: number;
+        fuelExpectedCost: number;
+        fuelActualCost: number;
+        fuelCostDiff: number;
+        hasFuel: boolean;
+      }
+    >();
+
+    filteredRows.forEach((r) => {
+      const ownerName = r.vehicleOwnerName || 'সাধারণ';
+      if (!grouped.has(ownerName)) {
+        grouped.set(ownerName, {
+          ownerName,
+          ownerPhone: r.vehicleOwnerPhone || '',
+          vehicles: new Set(),
+          tripCount: 0,
+          bookedSeats: 0,
+          seatFare: 0,
+          cargoFare: 0,
+          totalFare: 0,
+          fuelExpectedCost: 0,
+          fuelActualCost: 0,
+          fuelCostDiff: 0,
+          hasFuel: false,
+        });
+      }
+      const g = grouped.get(ownerName)!;
+      g.vehicles.add(r.vehicleRegNo);
+      if (!g.ownerPhone && r.vehicleOwnerPhone) g.ownerPhone = r.vehicleOwnerPhone;
+      g.tripCount += r.isFullTrip ? 1 : 0;
+      g.bookedSeats += r.combinedSeats;
+      g.seatFare += r.combinedSeatFare;
+      g.cargoFare += r.combinedCargoFare;
+      g.totalFare += r.combinedFare;
+      if (r.fuelCostDiff !== null) {
+        g.fuelExpectedCost += r.fuelExpectedCost;
+        g.fuelActualCost += r.fuelActualCost;
+        g.fuelCostDiff += r.fuelCostDiff;
+        g.hasFuel = true;
+      }
+    });
+
+    return Array.from(grouped.values()).map((g) => ({
+      ownerName: g.ownerName,
+      ownerPhone: g.ownerPhone,
+      vehicles: Array.from(g.vehicles),
+      tripCount: g.tripCount || 1,
+      bookedSeats: g.bookedSeats,
+      seatFare: g.seatFare,
+      cargoFare: g.cargoFare,
+      totalFare: g.totalFare,
+      fuelExpectedCost: g.hasFuel ? g.fuelExpectedCost : undefined,
+      fuelActualCost: g.hasFuel ? g.fuelActualCost : undefined,
+      fuelCostDiff: g.hasFuel ? g.fuelCostDiff : null,
+    }));
+  }, [filteredRows]);
+
+  // Export CSV with UTF-8 BOM containing Seat + Cargo + Total + Fuel +/- মূল্য columns
   const handleExportCSV = () => {
     const headers = [
       'সিরিয়াল',
@@ -675,6 +818,7 @@ export const DatabasePage: React.FC = () => {
       'সিট বুকিং টাকা (৳)',
       'মালের ভাড়া (৳)',
       'মোট টাকা (সিট+মাল) (৳)',
+      'ফুয়েল +/- মূল্য (৳)',
       'সুপারভাইজার',
       'ড্রাইভার',
       'স্ট্যাটাস',
@@ -696,6 +840,7 @@ export const DatabasePage: React.FC = () => {
       r.combinedSeatFare,
       r.combinedCargoFare,
       r.combinedFare,
+      r.fuelCostDiff !== null ? r.fuelCostDiff : '-',
       `"${r.supervisorDisplay}"`,
       `"${r.driverDisplay}"`,
       `"${r.status}"`,
@@ -715,7 +860,21 @@ export const DatabasePage: React.FC = () => {
   };
 
   const handlePrint = () => {
-    window.print();
+    printElementById('printable-database-report', `ডাটাবেইজ রিপোর্ট — ${date}`, 'A4-landscape');
+  };
+
+  const handleDownloadPDF = async () => {
+    try {
+      await downloadElementAsPDF(
+        'printable-database-report',
+        `Trip-Database-${date}.pdf`,
+        'landscape',
+        'a4'
+      );
+    } catch (err) {
+      console.error('Database PDF export error:', err);
+      printElementById('printable-database-report', `ডাটাবেইজ রিপোর্ট — ${date}`, 'A4-landscape');
+    }
   };
 
   // Generate AI Summary optionally
@@ -734,6 +893,7 @@ export const DatabasePage: React.FC = () => {
 
   return (
     <div className="space-y-6">
+      <div className="space-y-6 print:hidden">
       {/* Top Header Card */}
       <div className="bg-gradient-to-r from-slate-900 via-slate-800 to-emerald-950 text-white p-6 rounded-3xl shadow-lg border border-slate-700/50 flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
@@ -762,9 +922,19 @@ export const DatabasePage: React.FC = () => {
 
           <button
             type="button"
+            onClick={() => setShowWhatsAppModal(true)}
+            className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold shadow-md transition-all flex items-center gap-1.5 cursor-pointer"
+            title="মালিকদের মোবাইল নম্বরে হোয়াটসঅ্যাপে রিপোর্ট পাঠান"
+          >
+            <MessageCircle className="w-4 h-4" />
+            <span>হোয়াটসঅ্যাপ (মালিক)</span>
+          </button>
+
+          <button
+            type="button"
             onClick={handleExportCSV}
             className="px-3.5 py-2 bg-emerald-600/30 hover:bg-emerald-600/50 text-emerald-300 border border-emerald-500/40 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer"
-            title="১৩টি কলাম সহ এক্সেল ডাউনলোড"
+            title="এক্সেল ডাউনলোড"
           >
             <FileSpreadsheet className="w-4 h-4 text-emerald-400" />
             <span>এক্সেল (.CSV)</span>
@@ -772,12 +942,22 @@ export const DatabasePage: React.FC = () => {
 
           <button
             type="button"
+            onClick={handleDownloadPDF}
+            className="px-3.5 py-2 bg-slate-700 hover:bg-slate-600 text-white border border-slate-500 rounded-xl text-xs font-bold shadow-md transition-all flex items-center gap-1.5 cursor-pointer"
+            title="শুধু ডাটা টেবিল পিডিএফ ডাউনলোড করুন"
+          >
+            <Download className="w-4 h-4 text-emerald-400" />
+            <span>টেবিল PDF</span>
+          </button>
+
+          <button
+            type="button"
             onClick={handlePrint}
-            className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold shadow-md transition-all flex items-center gap-1.5 cursor-pointer"
-            title="পিডিএফ সংরক্ষণ বা প্রিন্ট করুন"
+            className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold shadow-md transition-all flex items-center gap-1.5 cursor-pointer"
+            title="শুধু ডাটা টেবিল প্রিন্ট / সেভ PDF"
           >
             <Printer className="w-4 h-4" />
-            <span>প্রিন্ট / সেভ PDF</span>
+            <span>শুধু টেবিল প্রিন্ট</span>
           </button>
 
           <button
@@ -1049,6 +1229,7 @@ export const DatabasePage: React.FC = () => {
                   <th className="px-2.5 py-2.5 border-r border-slate-300 min-w-[110px] text-right bg-blue-50/70">সিট বুকিং টাকা</th>
                   <th className="px-2.5 py-2.5 border-r border-slate-300 min-w-[100px] text-right bg-amber-50/70">মালের ভাড়া</th>
                   <th className="px-2.5 py-2.5 border-r border-slate-300 min-w-[115px] text-right bg-emerald-100/70 font-black">মোট টাকা</th>
+                  <th className="px-2.5 py-2.5 border-r border-slate-300 min-w-[105px] text-right bg-purple-50/70">ফুয়েল +/- মূল্য</th>
                   <th className="px-2.5 py-2.5 border-r border-slate-300 min-w-[100px]">সুপারভাইজার</th>
                   <th className="px-2.5 py-2.5 min-w-[100px]">ড্রাইভার</th>
                 </tr>
@@ -1179,7 +1360,26 @@ export const DatabasePage: React.FC = () => {
                       <div className="font-black text-emerald-950 text-xs">{formatTaka(row.combinedFare)}</div>
                     </td>
 
-                    {/* 15. সুপারভাইজার */}
+                    {/* 15. ফুয়েল +/- মূল্য */}
+                    <td className="px-2.5 py-2 border-r border-slate-300 text-right bg-purple-50/20 tabular-nums whitespace-nowrap">
+                      {row.fuelCostDiff !== null ? (
+                        <span
+                          className={`inline-block px-2 py-0.5 rounded font-bold text-[11px] border ${
+                            row.fuelCostDiff > 0
+                              ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                              : row.fuelCostDiff < 0
+                              ? 'bg-rose-50 text-rose-700 border-rose-200'
+                              : 'bg-slate-100 text-slate-700 border-slate-300'
+                          }`}
+                        >
+                          {formatSignedFuelCostDiff(row.fuelCostDiff)}
+                        </span>
+                      ) : (
+                        <span className="text-slate-400 text-xs">-</span>
+                      )}
+                    </td>
+
+                    {/* 16. সুপারভাইজার */}
                     <td className="px-2.5 py-2 border-r border-slate-300 font-semibold text-slate-800">
                       <div className="flex items-center gap-1">
                         <User className="w-3 h-3 text-slate-400 shrink-0" />
@@ -1187,7 +1387,7 @@ export const DatabasePage: React.FC = () => {
                       </div>
                     </td>
 
-                    {/* 16. ড্রাইভার */}
+                    {/* 17. ড্রাইভার */}
                     <td className="px-2.5 py-2 font-semibold text-slate-800">
                       <span>{row.driverDisplay}</span>
                     </td>
@@ -1224,6 +1424,11 @@ export const DatabasePage: React.FC = () => {
                   <td className="px-2.5 py-2.5 border-r border-slate-300 text-right text-emerald-950 font-black bg-emerald-100 tabular-nums whitespace-nowrap">
                     {formatTaka(filteredTotals.totalFare)}
                   </td>
+                  <td className={`px-2.5 py-2.5 border-r border-slate-300 text-right font-black tabular-nums whitespace-nowrap ${
+                    filteredTotals.fuelDiff > 0 ? 'text-emerald-800 bg-emerald-50' : filteredTotals.fuelDiff < 0 ? 'text-rose-800 bg-rose-50' : 'text-slate-700'
+                  }`}>
+                    {filteredTotals.hasFuelData ? formatSignedFuelCostDiff(filteredTotals.fuelDiff) : '-'}
+                  </td>
                   <td colSpan={2} className="px-3 py-2.5 text-center text-[11px] text-slate-600">
                     সমন্বয় সম্পন্ন
                   </td>
@@ -1233,111 +1438,194 @@ export const DatabasePage: React.FC = () => {
           </div>
         )}
       </div>
+      </div>
 
-      {/* Printable Sheet (hidden on screen, visible during window.print()) */}
-      <div id="printable-database-report" className="hidden print:block p-4 sm:p-6 bg-white text-slate-900 font-sans space-y-4">
-        <div className="text-center border-b-2 border-slate-800 pb-4 space-y-1">
-          <h2 className="text-2xl font-black text-slate-900 uppercase tracking-wide">
-            কাউন্টার ম্যানেজমেন্ট সিস্টেম ও বাস সার্ভিস
+      {/* Printable Sheet (hidden on screen, visible ONLY during isolated PDF/Print) */}
+      <div
+        id="printable-database-report"
+        className="hidden print:block font-sans"
+        style={{ backgroundColor: '#ffffff', color: '#0f172a', padding: '10px' }}
+      >
+        <div
+          className="recon-print-header"
+          style={{
+            textAlign: 'center',
+            borderBottom: '1.5px solid #0f172a',
+            paddingBottom: '8px',
+            marginBottom: '10px',
+          }}
+        >
+          <h2
+            className="recon-company-name"
+            style={{ fontSize: '19px', fontWeight: 800, color: '#0f172a', margin: 0, lineHeight: 1.35 }}
+          >
+            {user?.company?.name || 'কাউন্টার টিকেটিং'}
           </h2>
-          <p className="text-xs font-bold text-slate-700">
-            ডাটাবেইজ — দৈনিক ট্রিপ শিডিউল, নাইট হোল্ড সমন্বয় ও পূর্ণাঙ্গ ট্রিপ রেজিস্টার
-          </p>
-          <div className="flex justify-between items-center text-xs font-bold text-slate-700 pt-2 border-t border-slate-200 mt-2">
-            <span>অপারেশনাল তারিখ: {formatBengaliDate(date)} ({date})</span>
-            <span>মোট পূর্ণাঙ্গ ট্রিপ: {toBengaliDigits(stats.fullTrips)} টি</span>
-            <span>সর্বমোট আদায়: {formatTaka(stats.totalFare)}</span>
+          <div
+            className="recon-subtitle"
+            style={{ fontSize: '11px', fontWeight: 600, color: '#334155', marginTop: '3px', lineHeight: 1.4 }}
+          >
+            ট্রিপ সমন্বয় ডাটাবেইজ • তারিখ: {date} ({formatBengaliDate(date)}) • পূর্ণাঙ্গ ট্রিপ: {toBengaliDigits(stats.fullTrips)} টি • মোট আদায়: {formatTaka(stats.totalFare)}
           </div>
         </div>
 
-        {/* Print 13-Column Table */}
-        <table className="w-full text-[10px] border-collapse border border-slate-400">
+        {/* Print 17-Column Compressed Table with Separate Borders & Generous Line Height */}
+        <table
+          className="report-table recon-compact-table"
+          style={{
+            width: '100%',
+            tableLayout: 'fixed',
+            borderCollapse: 'separate',
+            borderSpacing: 0,
+            borderTop: '1px solid #475569',
+            borderLeft: '1px solid #475569',
+            fontSize: '9.5px',
+            lineHeight: 1.6,
+            backgroundColor: '#ffffff',
+            color: '#0f172a',
+          }}
+        >
+          <colgroup>
+            <col style={{ width: '2.8%' }} />
+            <col style={{ width: '5.5%' }} />
+            <col style={{ width: '6%' }} />
+            <col style={{ width: '4%' }} />
+            <col style={{ width: '5.2%' }} />
+            <col style={{ width: '5.2%' }} />
+            <col style={{ width: '5.5%' }} />
+            <col style={{ width: '12%' }} />
+            <col style={{ width: '5.5%' }} />
+            <col style={{ width: '7.5%' }} />
+            <col style={{ width: '7.5%' }} />
+            <col style={{ width: '5.5%' }} />
+            <col style={{ width: '5%' }} />
+            <col style={{ width: '6%' }} />
+            <col style={{ width: '5.8%' }} />
+            <col style={{ width: '5.5%' }} />
+            <col style={{ width: '5.5%' }} />
+          </colgroup>
           <thead>
-            <tr className="bg-slate-200 text-slate-900 font-bold border-b border-slate-400">
-              <th className="border border-slate-400 p-1 text-center w-7">ক্র.</th>
-              <th className="border border-slate-400 p-1 text-left">তারিখ</th>
-              <th className="border border-slate-400 p-1 text-left">গাড়ি নাম্বার</th>
-              <th className="border border-slate-400 p-1 text-center">নাইট হোল্ড</th>
-              <th className="border border-slate-400 p-1 text-left">আপ সময়</th>
-              <th className="border border-slate-400 p-1 text-left">ডাউন সময়</th>
-              <th className="border border-slate-400 p-1 text-center">ব্যবধান</th>
-              <th className="border border-slate-400 p-1 text-left">রুট (আপ + ডাউন)</th>
-              <th className="border border-slate-400 p-1 text-left">মোট দূরত্ব</th>
-              <th className="border border-slate-400 p-1 text-left">আপ সিট ও ভাড়া</th>
-              <th className="border border-slate-400 p-1 text-left">ডাউন সিট ও ভাড়া</th>
-              <th className="border border-slate-400 p-1 text-right">সিট টাকা</th>
-              <th className="border border-slate-400 p-1 text-right">মালের ভাড়া</th>
-              <th className="border border-slate-400 p-1 text-right font-black">মোট টাকা</th>
-              <th className="border border-slate-400 p-1 text-left">সুপারভাইজার</th>
-              <th className="border border-slate-400 p-1 text-left">ড্রাইভার</th>
+            <tr style={{ backgroundColor: '#e2e8f0', color: '#0f172a', fontWeight: 700, textAlign: 'center' }}>
+              <th style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 4px', lineHeight: 1.5 }}>ক্র.</th>
+              <th style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 4px', lineHeight: 1.5 }}>তারিখ</th>
+              <th style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 4px', lineHeight: 1.5 }}>গাড়ি</th>
+              <th style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 4px', lineHeight: 1.5 }}>নাইট</th>
+              <th style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 4px', lineHeight: 1.5 }}>আপ</th>
+              <th style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 4px', lineHeight: 1.5 }}>ডাউন</th>
+              <th style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 4px', lineHeight: 1.5 }}>ব্যবধান</th>
+              <th style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 4px', lineHeight: 1.5 }}>রুট</th>
+              <th style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 4px', lineHeight: 1.5 }}>কিমি</th>
+              <th style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 4px', lineHeight: 1.5 }}>আপ সিট/ভাড়া</th>
+              <th style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 4px', lineHeight: 1.5 }}>ডাউন সিট/ভাড়া</th>
+              <th style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 4px', lineHeight: 1.5, textAlign: 'right' }}>সিট</th>
+              <th style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 4px', lineHeight: 1.5, textAlign: 'right' }}>মাল</th>
+              <th style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 4px', lineHeight: 1.5, textAlign: 'right' }}>মোট টাকা</th>
+              <th style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 4px', lineHeight: 1.5, textAlign: 'right' }}>ফুয়েল +/-</th>
+              <th style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 4px', lineHeight: 1.5 }}>সুপারভাইজার</th>
+              <th style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 4px', lineHeight: 1.5 }}>ড্রাইভার</th>
             </tr>
           </thead>
           <tbody>
-            {filteredRows.map((row) => (
-              <tr key={row.id} className="border-b border-slate-300">
-                <td className="border border-slate-400 p-1 text-center font-bold">
+            {filteredRows.map((row, idx) => (
+              <tr key={row.id} style={{ backgroundColor: idx % 2 === 1 ? '#f8fafc' : '#ffffff' }}>
+                <td style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '7px 4px', lineHeight: 1.6, textAlign: 'center', fontWeight: 700 }}>
                   {toBengaliDigits(row.autoSerial)}
                 </td>
-                <td className="border border-slate-400 p-1 font-semibold">{row.dateDisplay}</td>
-                <td className="border border-slate-400 p-1 font-bold font-mono">{row.vehicleRegNo}</td>
-                <td className="border border-slate-400 p-1 text-center font-bold">
+                <td style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '7px 4px', lineHeight: 1.6, textAlign: 'center', fontWeight: 600 }}>
+                  {row.dateDisplay}
+                </td>
+                <td style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '7px 4px', lineHeight: 1.6, fontWeight: 800 }}>
+                  {row.vehicleRegNo}
+                </td>
+                <td style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '7px 4px', lineHeight: 1.6, textAlign: 'center', fontWeight: 700 }}>
                   {row.isNightHold ? 'হ্যাঁ' : 'না'}
                 </td>
-                <td className="border border-slate-400 p-1">{row.upTime}</td>
-                <td className="border border-slate-400 p-1">{row.downTime}</td>
-                <td className="border border-slate-400 p-1 text-center font-bold">{row.timeDiffDisplay}</td>
-                <td className="border border-slate-400 p-1 font-medium">{row.routeMerged}</td>
-                <td className="border border-slate-400 p-1 font-mono">{row.distanceKmDisplay}</td>
-                <td className="border border-slate-400 p-1">{row.upSeatsAndFare}</td>
-                <td className="border border-slate-400 p-1">{row.downSeatsAndFare}</td>
-                <td className="border border-slate-400 p-1 text-right font-semibold tabular-nums">{formatTaka(row.combinedSeatFare)}</td>
-                <td className="border border-slate-400 p-1 text-right font-semibold tabular-nums">{formatTaka(row.combinedCargoFare)}</td>
-                <td className="border border-slate-400 p-1 text-right font-bold tabular-nums">{formatTaka(row.combinedFare)}</td>
-                <td className="border border-slate-400 p-1">{row.supervisorDisplay}</td>
-                <td className="border border-slate-400 p-1">{row.driverDisplay}</td>
+                <td style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '7px 4px', lineHeight: 1.6, textAlign: 'center' }}>{row.upTime}</td>
+                <td style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '7px 4px', lineHeight: 1.6, textAlign: 'center' }}>{row.downTime}</td>
+                <td style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '7px 4px', lineHeight: 1.6, textAlign: 'center', fontWeight: 700 }}>{row.timeDiffDisplay}</td>
+                <td style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '7px 4px', lineHeight: 1.6, fontWeight: 600 }}>{row.routeMerged}</td>
+                <td style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '7px 4px', lineHeight: 1.6, textAlign: 'center' }}>{row.distanceKmDisplay}</td>
+                <td style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '7px 4px', lineHeight: 1.6 }}>{row.upSeatsAndFare}</td>
+                <td style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '7px 4px', lineHeight: 1.6 }}>{row.downSeatsAndFare}</td>
+                <td style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '7px 4px', lineHeight: 1.6, textAlign: 'right', fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>{formatTaka(row.combinedSeatFare)}</td>
+                <td style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '7px 4px', lineHeight: 1.6, textAlign: 'right', fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>{formatTaka(row.combinedCargoFare)}</td>
+                <td style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '7px 4px', lineHeight: 1.6, textAlign: 'right', fontWeight: 800, fontVariantNumeric: 'tabular-nums' }}>{formatTaka(row.combinedFare)}</td>
+                <td
+                  style={{
+                    borderRight: '1px solid #475569',
+                    borderBottom: '1px solid #475569',
+                    padding: '7px 4px',
+                    lineHeight: 1.6,
+                    textAlign: 'right',
+                    fontWeight: 700,
+                    fontVariantNumeric: 'tabular-nums',
+                    color: row.fuelCostDiff && row.fuelCostDiff > 0 ? '#065f46' : row.fuelCostDiff && row.fuelCostDiff < 0 ? '#b91c1c' : '#0f172a',
+                  }}
+                >
+                  {formatSignedFuelCostDiff(row.fuelCostDiff)}
+                </td>
+                <td style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '7px 4px', lineHeight: 1.6 }}>{row.supervisorDisplay}</td>
+                <td style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '7px 4px', lineHeight: 1.6 }}>{row.driverDisplay}</td>
               </tr>
             ))}
-            {/* Grand Totals */}
-            <tr className="bg-slate-200 font-bold border-t-2 border-slate-500">
-              <td colSpan={3} className="border border-slate-400 p-1.5 text-left font-black">
-                সর্বমোট: {toBengaliDigits(filteredTotals.fullTrips)} টি পূর্ণাঙ্গ ট্রিপ
+          </tbody>
+          <tfoot>
+            <tr style={{ backgroundColor: '#e2e8f0', fontWeight: 800 }}>
+              <td colSpan={3} style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 5px', lineHeight: 1.6, textAlign: 'left' }}>
+                মোট: {toBengaliDigits(filteredTotals.fullTrips)} টি ট্রিপ
               </td>
-              <td colSpan={6} className="border border-slate-400 p-1.5 text-right font-black">
-                মোট দূরত্ব: {toBengaliDigits(filteredTotals.distance)} কিমি
+              <td colSpan={6} style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 5px', lineHeight: 1.6, textAlign: 'right' }}>
+                দূরত্ব: {toBengaliDigits(filteredTotals.distance)} কিমি
               </td>
-              <td className="border border-slate-400 p-1.5 font-bold font-mono">
+              <td style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 4px', lineHeight: 1.6 }}>
                 {toBengaliDigits(filteredTotals.upSeats)} সিট | {formatTaka(filteredTotals.upFare)}
               </td>
-              <td className="border border-slate-400 p-1.5 font-bold font-mono">
+              <td style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 4px', lineHeight: 1.6 }}>
                 {toBengaliDigits(filteredTotals.downSeats)} সিট | {formatTaka(filteredTotals.downFare)}
               </td>
-              <td className="border border-slate-400 p-1.5 text-right font-bold font-mono tabular-nums">
+              <td style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 4px', lineHeight: 1.6, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
                 {formatTaka(filteredTotals.totalSeatFare)}
               </td>
-              <td className="border border-slate-400 p-1.5 text-right font-bold font-mono tabular-nums">
+              <td style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 4px', lineHeight: 1.6, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
                 {formatTaka(filteredTotals.totalCargoFare)}
               </td>
-              <td className="border border-slate-400 p-1.5 text-right font-black font-mono tabular-nums">
+              <td style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 4px', lineHeight: 1.6, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
                 {formatTaka(filteredTotals.totalFare)}
               </td>
-              <td colSpan={2} className="border border-slate-400 p-1.5 text-center text-[9px]">
+              <td
+                style={{
+                  borderRight: '1px solid #475569',
+                  borderBottom: '1px solid #475569',
+                  padding: '8px 4px',
+                  lineHeight: 1.6,
+                  textAlign: 'right',
+                  fontVariantNumeric: 'tabular-nums',
+                  color: filteredTotals.fuelDiff > 0 ? '#065f46' : filteredTotals.fuelDiff < 0 ? '#b91c1c' : '#0f172a',
+                }}
+              >
+                {filteredTotals.hasFuelData ? formatSignedFuelCostDiff(filteredTotals.fuelDiff) : '-'}
+              </td>
+              <td colSpan={2} style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 4px', lineHeight: 1.6, textAlign: 'center' }}>
                 অডিট সম্পন্ন
               </td>
             </tr>
-          </tbody>
+          </tfoot>
         </table>
-
-        {/* Authorization Signatures */}
-        <div className="pt-12 grid grid-cols-3 gap-8 text-center text-xs font-semibold text-slate-700">
-          <div className="border-t border-slate-400 pt-1">ডাটা এন্ট্রি সহকারী</div>
-          <div className="border-t border-slate-400 pt-1">ট্রাফিক কন্ট্রোলার</div>
-          <div className="border-t border-slate-400 pt-1">ম্যানেজার অনুমোদন</div>
-        </div>
       </div>
+
+      {/* Owner WhatsApp Modal */}
+      <OwnerWhatsAppModal
+        isOpen={showWhatsAppModal}
+        onClose={() => setShowWhatsAppModal(false)}
+        companyName={user?.company?.name || 'কাউন্টার টিকেটিং'}
+        reportTitle="ডাটাবেইজ ও ফুয়েল +/- মূল্য রিপোর্ট"
+        dateLabel={`${date} (${formatBengaliDate(date)})`}
+        items={whatsappOwnerItems}
+      />
 
       {/* AI Insights Modal */}
       {showAiModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 print:hidden">
           <div className="bg-white rounded-3xl max-w-xl w-full p-6 shadow-2xl border border-slate-200 space-y-4">
             <div className="flex items-center justify-between pb-3 border-b">
               <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">

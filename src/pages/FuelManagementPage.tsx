@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useAuth } from '../context/AuthContext.tsx';
 import { api } from '../services/api.ts';
-import type { FuelEntry, FuelSettings } from '../types/index.ts';
+import type { FuelEntry, FuelSettings, Vehicle } from '../types/index.ts';
 import {
   toBengaliDigits,
   getTodayDhakaDate,
@@ -10,8 +10,16 @@ import {
 import {
   combineRouteNames,
   downloadElementAsPDF,
-  openPrintWindow,
+  printElementById,
 } from '../utils/pdfGenerator.ts';
+import {
+  buildOwnerWhatsAppMessage,
+  buildWhatsAppUrl,
+  formatSignedFuelCostDiff,
+  normalizeRegNo,
+  type OwnerReportSummaryItem,
+} from '../utils/whatsapp.ts';
+import { OwnerWhatsAppModal } from '../components/OwnerWhatsAppModal.tsx';
 import {
   Fuel,
   Calendar,
@@ -25,11 +33,10 @@ import {
   Edit2,
   Trash2,
   CheckCircle2,
-  AlertCircle,
   Bus,
   Save,
   Check,
-  Building2,
+  MessageCircle,
 } from 'lucide-react';
 
 interface PendingTrip {
@@ -98,9 +105,11 @@ export const FuelManagementPage: React.FC = () => {
   // Data
   const [fuelEntries, setFuelEntries] = useState<FuelEntry[]>([]);
   const [pendingTrips, setPendingTrips] = useState<PendingTrip[]>([]);
+  const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [vehiclesList, setVehiclesList] = useState<{ id: string; regNo: string }[]>([]);
   const [supervisorsList, setSupervisorsList] = useState<string[]>([]);
   const [driversList, setDriversList] = useState<string[]>([]);
+  const [showWhatsAppModal, setShowWhatsAppModal] = useState<boolean>(false);
 
   // Modal State
   const [isModalOpen, setIsModalOpen] = useState<boolean>(false);
@@ -118,6 +127,7 @@ export const FuelManagementPage: React.FC = () => {
   const [formActualLiters, setFormActualLiters] = useState<string>('');
   const [formReconciliationId, setFormReconciliationId] = useState<string | undefined>(undefined);
   const [toastMessage, setToastMessage] = useState<string>('');
+  const [modalError, setModalError] = useState<string>('');
 
   const printSheetRef = useRef<HTMLDivElement>(null);
 
@@ -160,6 +170,7 @@ export const FuelManagementPage: React.FC = () => {
       }
 
       if (vehRes?.vehicles) {
+        setVehicles(vehRes.vehicles);
         setVehiclesList(
           vehRes.vehicles.map((v) => ({
             id: v.id,
@@ -376,6 +387,11 @@ export const FuelManagementPage: React.FC = () => {
     return Number((km / mil).toFixed(1));
   }, [formTotalKm, formMileage]);
 
+  const computedExpectedCost = useMemo(() => {
+    const rate = fuelSettings.fuelPricePerLiter || 135.4;
+    return Math.round(computedExpectedLiters * rate);
+  }, [computedExpectedLiters, fuelSettings.fuelPricePerLiter]);
+
   const computedTotalMoney = useMemo(() => {
     const liters = parseFloat(formActualLiters) || 0;
     const rate = fuelSettings.fuelPricePerLiter || 135.4;
@@ -388,17 +404,41 @@ export const FuelManagementPage: React.FC = () => {
     return Number(diff.toFixed(1));
   }, [formActualLiters, computedExpectedLiters]);
 
+  const computedCostDifference = useMemo(() => {
+    // নির্ধারিত মূল্য - প্রদানকৃত মূল্য = +/- মূল্য
+    return computedExpectedCost - computedTotalMoney;
+  }, [computedExpectedCost, computedTotalMoney]);
+
+  const getFuelEntryCosts = (entry: FuelEntry) => {
+    const rate = Number(entry.fuelRatePerLiter) || fuelSettings.fuelPricePerLiter || 135.4;
+    const expectedCost =
+      entry.expectedFuelCost !== undefined && entry.expectedFuelCost !== null
+        ? Math.round(Number(entry.expectedFuelCost))
+        : Math.round((Number(entry.expectedFuelLiters) || 0) * rate);
+    const actualCost =
+      Number(entry.totalCost) || Math.round((Number(entry.actualFuelLiters) || 0) * rate);
+    const costDiff =
+      entry.fuelCostDifference !== undefined && entry.fuelCostDifference !== null
+        ? Math.round(Number(entry.fuelCostDifference))
+        : expectedCost - actualCost;
+    return { expectedCost, actualCost, costDiff };
+  };
+
   // Save Modal Form
   const handleSaveModalEntry = async (e: React.FormEvent) => {
     e.preventDefault();
+    setModalError('');
     const actualLitersNum = parseFloat(formActualLiters);
     if (isNaN(actualLitersNum) || actualLitersNum <= 0) {
-      alert('অনুগ্রহ করে তেলের সঠিক পরিমাণ (লিটার) লিখুন।');
+      setModalError('অনুগ্রহ করে তেলের সঠিক পরিমাণ (লিটার) লিখুন।');
       return;
     }
 
     const dayName = getBengaliDayOfWeek(formDate);
-    const totalCost = Math.round(actualLitersNum * (fuelSettings.fuelPricePerLiter || 135.4));
+    const rate = fuelSettings.fuelPricePerLiter || 135.4;
+    const totalCost = Math.round(actualLitersNum * rate);
+    const expectedFuelCost = Math.round(computedExpectedLiters * rate);
+    const fuelCostDifference = expectedFuelCost - totalCost;
     const fuelDiff = Number((actualLitersNum - computedExpectedLiters).toFixed(1));
 
     try {
@@ -416,8 +456,10 @@ export const FuelManagementPage: React.FC = () => {
           mileage: formMileage,
           expectedFuelLiters: computedExpectedLiters,
           actualFuelLiters: actualLitersNum,
-          fuelRatePerLiter: fuelSettings.fuelPricePerLiter,
+          fuelRatePerLiter: rate,
           totalCost,
+          expectedFuelCost,
+          fuelCostDifference,
           fuelDifference: fuelDiff,
         });
         showToast('ফুয়েল এন্ট্রি সফলভাবে আপডেট হয়েছে!');
@@ -439,8 +481,10 @@ export const FuelManagementPage: React.FC = () => {
           mileage: formMileage,
           expectedFuelLiters: computedExpectedLiters,
           actualFuelLiters: actualLitersNum,
-          fuelRatePerLiter: fuelSettings.fuelPricePerLiter,
+          fuelRatePerLiter: rate,
           totalCost,
+          expectedFuelCost,
+          fuelCostDifference,
           fuelDifference: fuelDiff,
         });
         showToast(`গাড়ি ${formVehicleRegNo} এ ${actualLitersNum} লিটার তেল সফলভাবে যুক্ত হয়েছে!`);
@@ -450,7 +494,7 @@ export const FuelManagementPage: React.FC = () => {
       fetchFuelData();
     } catch (err) {
       console.error('Failed to save fuel entry:', err);
-      alert('এন্ট্রি সংরক্ষণ করতে সমস্যা হয়েছে। আবার চেষ্টা করুন।');
+      setModalError('এন্ট্রি সংরক্ষণ করতে সমস্যা হয়েছে। আবার চেষ্টা করুন।');
     }
   };
 
@@ -467,9 +511,89 @@ export const FuelManagementPage: React.FC = () => {
     );
   }, [fuelEntries, searchTerm]);
 
+  const fuelTotals = useMemo(() => {
+    return filteredFuelEntries.reduce(
+      (acc, entry) => {
+        const costs = getFuelEntryCosts(entry);
+        acc.km += Number(entry.totalKm) || 0;
+        acc.expectedLiters += Number(entry.expectedFuelLiters) || 0;
+        acc.actualLiters += Number(entry.actualFuelLiters) || 0;
+        acc.expectedCost += costs.expectedCost;
+        acc.actualCost += costs.actualCost;
+        acc.costDiff += costs.costDiff;
+        return acc;
+      },
+      { km: 0, expectedLiters: 0, actualLiters: 0, expectedCost: 0, actualCost: 0, costDiff: 0 }
+    );
+  }, [filteredFuelEntries, fuelSettings.fuelPricePerLiter]);
+
+  const ownerMapByReg = useMemo(() => {
+    const m = new Map<string, Vehicle>();
+    vehicles.forEach((v) => m.set(normalizeRegNo(v.regNo), v));
+    return m;
+  }, [vehicles]);
+
+  const whatsappOwnerItems: OwnerReportSummaryItem[] = useMemo(() => {
+    const grouped = new Map<
+      string,
+      {
+        ownerName: string;
+        ownerPhone: string;
+        vehicles: Set<string>;
+        tripCount: number;
+        expectedCost: number;
+        actualCost: number;
+        costDiff: number;
+        lines: string[];
+      }
+    >();
+
+    filteredFuelEntries.forEach((entry) => {
+      const veh = ownerMapByReg.get(normalizeRegNo(entry.vehicleRegNo));
+      const ownerName = veh?.ownerName?.trim() || 'সাধারণ মালিক';
+      const ownerPhone = veh?.ownerPhone || '';
+      const costs = getFuelEntryCosts(entry);
+
+      if (!grouped.has(ownerName)) {
+        grouped.set(ownerName, {
+          ownerName,
+          ownerPhone,
+          vehicles: new Set(),
+          tripCount: 0,
+          expectedCost: 0,
+          actualCost: 0,
+          costDiff: 0,
+          lines: [],
+        });
+      }
+      const g = grouped.get(ownerName)!;
+      g.vehicles.add(entry.vehicleRegNo);
+      if (!g.ownerPhone && ownerPhone) g.ownerPhone = ownerPhone;
+      g.tripCount += 1;
+      g.expectedCost += costs.expectedCost;
+      g.actualCost += costs.actualCost;
+      g.costDiff += costs.costDiff;
+      g.lines.push(
+        `${entry.vehicleRegNo} (${toBengaliDigits(entry.date)}): নির্ধারিত ${formatTaka(costs.expectedCost)}, প্রদান ${formatTaka(costs.actualCost)}, +/- ${formatSignedFuelCostDiff(costs.costDiff)}`
+      );
+    });
+
+    return Array.from(grouped.values()).map((g) => ({
+      ownerName: g.ownerName,
+      ownerPhone: g.ownerPhone,
+      vehicles: Array.from(g.vehicles),
+      tripCount: g.tripCount,
+      totalFare: g.actualCost,
+      fuelExpectedCost: g.expectedCost,
+      fuelActualCost: g.actualCost,
+      fuelCostDiff: g.costDiff,
+      customLines: g.lines,
+    }));
+  }, [filteredFuelEntries, ownerMapByReg, fuelSettings.fuelPricePerLiter]);
+
   // Handle Export / Print
   const handlePrint = () => {
-    openPrintWindow('printable-fuel-log-sheet', 'A4-landscape');
+    printElementById('printable-fuel-log-sheet', `ফুয়েল লগ — ${startDate}`, 'A4-landscape');
   };
 
   const handleDownloadPDF = async () => {
@@ -481,6 +605,7 @@ export const FuelManagementPage: React.FC = () => {
       );
     } catch (err) {
       console.error('PDF error:', err);
+      printElementById('printable-fuel-log-sheet', `ফুয়েল লগ — ${startDate}`, 'A4-landscape');
     }
   };
 
@@ -493,6 +618,7 @@ export const FuelManagementPage: React.FC = () => {
 
   return (
     <div className="p-3 sm:p-5 max-w-7xl mx-auto space-y-5 text-slate-800 font-sans">
+      <div className="space-y-5 print:hidden">
       {/* Toast Notification */}
       {toastMessage && (
         <div className="fixed top-5 right-5 z-50 bg-emerald-700 text-white px-4 py-2.5 rounded-xl shadow-lg flex items-center gap-2 border border-emerald-500 animate-in fade-in slide-in-from-top-2">
@@ -513,7 +639,15 @@ export const FuelManagementPage: React.FC = () => {
             <span className="text-slate-300">|</span>
             <span className="px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 font-bold text-[10px]">বাংলা</span>
             <span className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 font-semibold text-[10px]">
-              {user?.role === 'super_admin' ? 'সুপার এডমিন' : 'কোম্পানি এডমিন'}
+              {user?.role === 'super_admin'
+                ? 'সুপার এডমিন'
+                : user?.role === 'company_admin'
+                ? 'মাস্টার এডমিন'
+                : user?.role === 'fuel_manager'
+                ? 'ফুয়েল ম্যানেজার'
+                : user?.role === 'moderator'
+                ? 'মডারেটর'
+                : 'মাস্টার এডমিন'}
             </span>
           </div>
           <h1 className="text-2xl sm:text-3xl font-extrabold text-slate-900 flex items-center gap-2.5">
@@ -586,26 +720,38 @@ export const FuelManagementPage: React.FC = () => {
           </select>
         </div>
 
-        <div className="flex items-center gap-1.5">
+        <div className="flex flex-wrap items-center gap-1.5">
           <button
+            type="button"
+            onClick={() => setShowWhatsAppModal(true)}
+            className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg flex items-center gap-1.5 transition-colors cursor-pointer"
+            title="মালিকদের হোয়াটসঅ্যাপে পাঠান"
+          >
+            <MessageCircle className="w-3.5 h-3.5" />
+            <span>হোয়াটসঅ্যাপ (মালিক)</span>
+          </button>
+          <button
+            type="button"
             onClick={handlePrint}
-            className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-lg flex items-center gap-1 border border-slate-300 transition-colors"
-            title="প্রিন্ট করুন"
+            className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-lg flex items-center gap-1 border border-slate-300 transition-colors cursor-pointer"
+            title="শুধু টেবিল প্রিন্ট করুন"
           >
             <Printer className="w-3.5 h-3.5 text-slate-600" />
-            <span>প্রিন্ট</span>
+            <span>শুধু টেবিল প্রিন্ট</span>
           </button>
           <button
+            type="button"
             onClick={handleDownloadPDF}
-            className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-lg flex items-center gap-1 border border-slate-300 transition-colors"
-            title="পিডিএফ ডাউনলোড"
+            className="px-3 py-1.5 bg-slate-800 hover:bg-slate-900 text-white text-xs font-semibold rounded-lg flex items-center gap-1 border border-slate-700 transition-colors cursor-pointer"
+            title="শুধু টেবিল পিডিএফ ডাউনলোড"
           >
-            <Download className="w-3.5 h-3.5 text-slate-600" />
-            <span>পিডিএফ</span>
+            <Download className="w-3.5 h-3.5 text-emerald-400" />
+            <span>টেবিল PDF</span>
           </button>
           <button
+            type="button"
             onClick={handleShare}
-            className="p-2 bg-slate-100 hover:bg-slate-200 text-slate-600 text-xs rounded-lg border border-slate-300 transition-colors"
+            className="p-2 bg-slate-100 hover:bg-slate-200 text-slate-600 text-xs rounded-lg border border-slate-300 transition-colors cursor-pointer"
             title="শেয়ার"
           >
             <Share2 className="w-3.5 h-3.5" />
@@ -784,7 +930,7 @@ export const FuelManagementPage: React.FC = () => {
         </div>
 
         <div className="overflow-x-auto">
-          <table className="w-full text-xs text-left border-collapse min-w-[950px]">
+          <table className="w-full text-xs text-left border-collapse min-w-[1120px]">
             <thead>
               <tr className="bg-slate-100 text-slate-700 font-bold border-b border-slate-200">
                 <th className="p-2.5 text-center">ক্রমিক নং</th>
@@ -792,15 +938,16 @@ export const FuelManagementPage: React.FC = () => {
                 <th className="p-2.5 text-center">বার</th>
                 <th className="p-2.5 text-center">সময়</th>
                 <th className="p-2.5 text-center">গাড়ি নাম্বার</th>
-                <th className="p-2.5 text-center">দিক</th>
                 <th className="p-2.5">রুট</th>
                 <th className="p-2.5">সুপারভাইজার</th>
                 <th className="p-2.5">ড্রাইভার</th>
                 <th className="p-2.5 text-center">মোট কিমি</th>
-                <th className="p-2.5 text-center">নির্ধারিত ফুয়েল</th>
-                <th className="p-2.5 text-center">প্রদানকৃত ফুয়েল</th>
-                <th className="p-2.5 text-right">মোট টাকা</th>
-                <th className="p-2.5 text-center">ফুয়েল +/-</th>
+                <th className="p-2.5 text-center">নির্ধারিত (লি.)</th>
+                <th className="p-2.5 text-center">প্রদানকৃত (লি.)</th>
+                <th className="p-2.5 text-right bg-slate-200/60">নির্ধারিত মূল্য</th>
+                <th className="p-2.5 text-right bg-blue-50/70">প্রদানকৃত মূল্য</th>
+                <th className="p-2.5 text-right bg-amber-50/80">+/- মূল্য</th>
+                <th className="p-2.5 text-center">ফুয়েল +/- (লি.)</th>
                 <th className="p-2.5 text-center">একশন</th>
               </tr>
             </thead>
@@ -816,29 +963,60 @@ export const FuelManagementPage: React.FC = () => {
                       ? 'bg-emerald-50 text-emerald-600 border-emerald-200'
                       : 'bg-blue-50 text-blue-600 border-blue-200';
                   const diffText = diff > 0 ? `+${diff}` : `${diff}`;
+                  const costs = getFuelEntryCosts(entry);
+                  const costDiffColor =
+                    costs.costDiff > 0
+                      ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                      : costs.costDiff < 0
+                      ? 'bg-rose-50 text-rose-700 border-rose-200'
+                      : 'bg-blue-50 text-blue-700 border-blue-200';
+                  const vehOwner = ownerMapByReg.get(normalizeRegNo(entry.vehicleRegNo));
+                  const ownerWaUrl = vehOwner?.ownerPhone
+                    ? buildWhatsAppUrl(
+                        vehOwner.ownerPhone,
+                        buildOwnerWhatsAppMessage(
+                          user?.company?.name || 'পরিবহন সার্ভিস',
+                          'ফুয়েল লগ হিসাব',
+                          toBengaliDigits(entry.date),
+                          {
+                            ownerName: vehOwner.ownerName || 'মালিক',
+                            ownerPhone: vehOwner.ownerPhone,
+                            vehicles: [entry.vehicleRegNo],
+                            tripCount: 1,
+                            totalFare: costs.actualCost,
+                            fuelExpectedCost: costs.expectedCost,
+                            fuelActualCost: costs.actualCost,
+                            fuelCostDiff: costs.costDiff,
+                            customLines: [
+                              `রুট: ${entry.route}`,
+                              `মোট কিমি: ${toBengaliDigits(entry.totalKm)} কিমি`,
+                              `নির্ধারিত ফুয়েল: ${toBengaliDigits(entry.expectedFuelLiters)} লি.`,
+                              `প্রদানকৃত ফুয়েল: ${toBengaliDigits(entry.actualFuelLiters)} লি.`,
+                            ],
+                          }
+                        )
+                      )
+                    : '';
 
                   return (
                     <tr key={entry.id} className="hover:bg-slate-50 transition-colors">
                       <td className="p-2.5 text-center font-mono font-bold text-slate-500">
                         {serialBn}
                       </td>
-                      <td className="p-2.5 text-center font-medium">
+                      <td className="p-2.5 text-center font-medium whitespace-nowrap">
                         {toBengaliDigits(entry.date)}
                       </td>
-                      <td className="p-2.5 text-center text-slate-600">
+                      <td className="p-2.5 text-center text-slate-600 whitespace-nowrap">
                         {entry.dayOfWeek || getBengaliDayOfWeek(entry.date)}
                       </td>
-                      <td className="p-2.5 text-center text-slate-600">
+                      <td className="p-2.5 text-center text-slate-600 whitespace-nowrap">
                         {formatBengaliTime(entry.time)}
                       </td>
-                      <td className="p-2.5 text-center font-bold text-slate-900">
+                      <td className="p-2.5 text-center font-bold text-slate-900 whitespace-nowrap">
                         <span className="inline-flex items-center gap-1">
                           <Bus className="w-3.5 h-3.5 text-blue-600" />
                           <span>{entry.vehicleRegNo}</span>
                         </span>
-                      </td>
-                      <td className="p-2.5 text-center text-slate-600">
-                        {entry.direction || 'আপ-ডাউন'}
                       </td>
                       <td className="p-2.5 font-semibold text-slate-800">
                         {entry.route}
@@ -854,8 +1032,18 @@ export const FuelManagementPage: React.FC = () => {
                       <td className="p-2.5 text-center font-mono font-extrabold text-blue-700">
                         {toBengaliDigits(entry.actualFuelLiters)}
                       </td>
-                      <td className="p-2.5 text-right font-mono font-bold text-slate-900">
-                        {formatTaka(entry.totalCost)}
+                      <td className="p-2.5 text-right font-mono font-semibold text-slate-700 bg-slate-50/70 tabular-nums whitespace-nowrap">
+                        {formatTaka(costs.expectedCost)}
+                      </td>
+                      <td className="p-2.5 text-right font-mono font-bold text-slate-900 bg-blue-50/30 tabular-nums whitespace-nowrap">
+                        {formatTaka(costs.actualCost)}
+                      </td>
+                      <td className="p-2.5 text-right font-mono bg-amber-50/30 tabular-nums whitespace-nowrap">
+                        <span
+                          className={`px-2 py-0.5 rounded-md font-bold text-[11px] border ${costDiffColor}`}
+                        >
+                          {formatSignedFuelCostDiff(costs.costDiff)}
+                        </span>
                       </td>
                       <td className="p-2.5 text-center font-mono">
                         <span
@@ -866,16 +1054,27 @@ export const FuelManagementPage: React.FC = () => {
                       </td>
                       <td className="p-2.5 text-center">
                         <div className="flex items-center justify-center gap-1">
+                          {ownerWaUrl && (
+                            <a
+                              href={ownerWaUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="p-1 text-emerald-600 hover:bg-emerald-50 rounded transition-colors"
+                              title={`মালিককে (${vehOwner?.ownerName || ''}) হোয়াটসঅ্যাপে পাঠান`}
+                            >
+                              <MessageCircle className="w-3.5 h-3.5" />
+                            </a>
+                          )}
                           <button
                             onClick={() => handleEditEntry(entry)}
-                            className="p-1 text-slate-500 hover:text-blue-600 rounded transition-colors"
+                            className="p-1 text-slate-500 hover:text-blue-600 rounded transition-colors cursor-pointer"
                             title="সম্পাদনা করুন"
                           >
                             <Edit2 className="w-3.5 h-3.5" />
                           </button>
                           <button
                             onClick={() => handleDeleteEntry(entry.id, entry.vehicleRegNo)}
-                            className="p-1 text-slate-500 hover:text-rose-600 rounded transition-colors"
+                            className="p-1 text-slate-500 hover:text-rose-600 rounded transition-colors cursor-pointer"
                             title="মুছে ফেলুন"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
@@ -887,12 +1086,32 @@ export const FuelManagementPage: React.FC = () => {
                 })
               ) : (
                 <tr>
-                  <td colSpan={15} className="p-8 text-center text-slate-400 text-xs">
+                  <td colSpan={16} className="p-8 text-center text-slate-400 text-xs">
                     কোনো ফুয়েল এন্ট্রি পাওয়া যায়নি।
                   </td>
                 </tr>
               )}
             </tbody>
+            {filteredFuelEntries.length > 0 && (
+              <tfoot>
+                <tr className="bg-slate-100 border-t-2 border-slate-300 font-extrabold text-slate-900">
+                  <td colSpan={8} className="p-2.5 text-right">
+                    সর্বমোট ({toBengaliDigits(filteredFuelEntries.length)} টি এন্ট্রি):
+                  </td>
+                  <td className="p-2.5 text-center font-mono">{toBengaliDigits(fuelTotals.km)}</td>
+                  <td className="p-2.5 text-center font-mono">{toBengaliDigits(fuelTotals.expectedLiters.toFixed(1))}</td>
+                  <td className="p-2.5 text-center font-mono text-blue-800">{toBengaliDigits(fuelTotals.actualLiters.toFixed(1))}</td>
+                  <td className="p-2.5 text-right font-mono tabular-nums whitespace-nowrap">{formatTaka(fuelTotals.expectedCost)}</td>
+                  <td className="p-2.5 text-right font-mono text-blue-900 tabular-nums whitespace-nowrap">{formatTaka(fuelTotals.actualCost)}</td>
+                  <td className={`p-2.5 text-right font-mono tabular-nums whitespace-nowrap ${fuelTotals.costDiff > 0 ? 'text-emerald-700' : fuelTotals.costDiff < 0 ? 'text-rose-700' : 'text-slate-800'}`}>
+                    {formatSignedFuelCostDiff(fuelTotals.costDiff)}
+                  </td>
+                  <td colSpan={2} className="p-2.5 text-center text-[11px] text-slate-600">
+                    নির্ধারিত - প্রদানকৃত = +/- মূল্য
+                  </td>
+                </tr>
+              </tfoot>
+            )}
           </table>
         </div>
 
@@ -901,9 +1120,8 @@ export const FuelManagementPage: React.FC = () => {
           <div>
             মোট <span className="font-bold text-slate-800">{toBengaliDigits(filteredFuelEntries.length)}</span> টি এন্ট্রি
           </div>
-          <div className="flex items-center gap-1.5 text-emerald-700 font-semibold">
-            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-            <span>ক্লাউডে সংরক্ষিত</span>
+          <div className="text-slate-600 font-medium">
+            হিসাব সূত্র: নির্ধারিত তেলের মূল্য − প্রদানকৃত তেলের মূল্য = +/- মূল্য
           </div>
         </div>
       </div>
@@ -1095,42 +1313,53 @@ export const FuelManagementPage: React.FC = () => {
               </div>
 
               {/* Row 8: Auto Calculation Card */}
-              <div className="bg-slate-100/90 border border-slate-200 rounded-xl p-3 flex items-center justify-between">
+              <div className="bg-slate-100/90 border border-slate-200 rounded-xl p-3 grid grid-cols-3 gap-2 text-center">
                 <div>
-                  <span className="text-[11px] text-slate-500 block font-semibold">
-                    মোট টাকা
+                  <span className="text-[10.5px] text-slate-500 block font-semibold">
+                    নির্ধারিত মূল্য
                   </span>
-                  <span className="text-sm font-extrabold text-slate-900 font-mono">
+                  <span className="text-sm font-extrabold text-slate-800 font-mono">
+                    {formatTaka(computedExpectedCost)}
+                  </span>
+                </div>
+
+                <div>
+                  <span className="text-[10.5px] text-slate-500 block font-semibold">
+                    প্রদানকৃত মূল্য
+                  </span>
+                  <span className="text-sm font-extrabold text-blue-800 font-mono">
                     {formatTaka(computedTotalMoney)}
                   </span>
                 </div>
 
-                <div className="flex items-center gap-2">
-                  <span className="text-[11px] text-slate-500 font-semibold">
-                    ফুয়েল +/-
+                <div>
+                  <span className="text-[10.5px] text-slate-500 block font-semibold">
+                    +/- মূল্য
                   </span>
                   <span
-                    className={`px-2.5 py-1 rounded-md text-xs font-mono font-bold border ${
-                      computedFuelDifference > 0
-                        ? 'bg-rose-50 text-rose-600 border-rose-200'
-                        : computedFuelDifference < 0
-                        ? 'bg-emerald-50 text-emerald-600 border-emerald-200'
-                        : 'bg-blue-50 text-blue-600 border-blue-200'
+                    className={`inline-block px-2 py-0.5 rounded-md text-xs font-mono font-bold border ${
+                      computedCostDifference > 0
+                        ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                        : computedCostDifference < 0
+                        ? 'bg-rose-50 text-rose-700 border-rose-200'
+                        : 'bg-blue-50 text-blue-700 border-blue-200'
                     }`}
                   >
-                    {toBengaliDigits(
-                      computedFuelDifference > 0
-                        ? `+${computedFuelDifference}`
-                        : `${computedFuelDifference}`
-                    )}
+                    {formatSignedFuelCostDiff(computedCostDifference)}
                   </span>
                 </div>
               </div>
 
+              {modalError && (
+                <div className="p-2.5 bg-rose-50 border border-rose-200 rounded-lg text-xs font-semibold text-rose-700">
+                  {modalError}
+                </div>
+              )}
+
               {/* Submit Button */}
               <button
                 type="submit"
-                className="w-full py-3 bg-blue-600 hover:bg-blue-700 text-white font-extrabold text-sm rounded-xl shadow-md transition-all flex items-center justify-center gap-2"
+                className="w-full py-3 bg-blue-600 hover:bg-blue-700 text-white font-extrabold text-sm rounded-xl shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer"
               >
                 <Check className="w-4 h-4" />
                 <span>এন্ট্রি সংরক্ষণ করুন</span>
@@ -1139,115 +1368,214 @@ export const FuelManagementPage: React.FC = () => {
           </div>
         </div>
       )}
+      </div>
 
       {/* ======================================================== */}
-      {/* Hidden Print Template for High-Res Bengali Unicode Print  */}
+      {/* Hidden Print Template for Clean Table-Only Bengali Print & PDF */}
       {/* ======================================================== */}
-      <div id="printable-fuel-log-sheet" className="hidden">
-        <div style={{ fontFamily: "'Hind Siliguri', sans-serif", padding: '12px' }}>
-          {/* Company Letterhead */}
-          <div style={{ borderBottom: '2px solid #0f172a', paddingBottom: '10px', marginBottom: '14px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                {user?.company?.logoUrl && (
-                  <img
-                    src={user.company.logoUrl}
-                    alt="Company Logo"
-                    style={{ width: '48px', height: '48px', borderRadius: '8px', objectFit: 'contain', background: '#ffffff', border: '1px solid #cbd5e1' }}
-                  />
-                )}
-                <div>
-                  <h1 style={{ fontSize: '20px', fontWeight: 'bold', margin: '0', color: '#0f172a' }}>
-                    {user?.company?.name || 'কাউন্টার ট্রিপ ফুয়েল লগ'}
-                  </h1>
-                  <div style={{ fontSize: '11px', color: '#475569' }}>
-                    {user?.company?.address ? `${user.company.address} | ` : ''}{user?.company?.phone ? `হটলাইন: ${user.company.phone}` : ''}
-                  </div>
-                </div>
-              </div>
-
-              <div style={{ textAlign: 'right' }}>
-                <div style={{ display: 'inline-block', padding: '4px 10px', background: '#f1f5f9', border: '1px solid #cbd5e1', fontWeight: 'bold', fontSize: '12px' }}>
-                  দৈনিক ট্রিপ ফুয়েল ও ডিজেল ব্যবহারের বিবরণী
-                </div>
-                <div style={{ fontSize: '11px', marginTop: '4px', color: '#334155' }}>
-                  তারিখ: <strong>{toBengaliDigits(startDate)}</strong> থেকে <strong>{toBengaliDigits(endDate)}</strong>
-                </div>
-              </div>
+      <div id="printable-fuel-log-sheet" className="hidden print:block">
+        <div
+          style={{
+            fontFamily: "'Hind Siliguri', sans-serif",
+            padding: '10px',
+            backgroundColor: '#ffffff',
+            color: '#0f172a',
+          }}
+        >
+          {/* Company Name + Date Only Header */}
+          <div
+            className="recon-print-header"
+            style={{
+              textAlign: 'center',
+              borderBottom: '1.5px solid #0f172a',
+              paddingBottom: '8px',
+              marginBottom: '10px',
+            }}
+          >
+            <h1
+              className="recon-company-name"
+              style={{ fontSize: '19px', fontWeight: 800, margin: 0, color: '#0f172a', lineHeight: 1.35 }}
+            >
+              {user?.company?.name || 'কাউন্টার টিকেটিং'}
+            </h1>
+            <div
+              className="recon-subtitle"
+              style={{ fontSize: '11px', fontWeight: 600, marginTop: '3px', color: '#334155', lineHeight: 1.4 }}
+            >
+              দৈনিক ট্রিপ ফুয়েল লগ ডাটাবেইজ • তারিখ: {toBengaliDigits(startDate)} থেকে {toBengaliDigits(endDate)}
             </div>
           </div>
 
-          {/* Table */}
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '10px', marginBottom: '20px' }}>
+          {/* Table with separate borders and generous cell breathing room */}
+          <table
+            className="report-table recon-compact-table"
+            style={{
+              width: '100%',
+              tableLayout: 'fixed',
+              borderCollapse: 'separate',
+              borderSpacing: 0,
+              borderTop: '1px solid #475569',
+              borderLeft: '1px solid #475569',
+              fontSize: '10px',
+              lineHeight: 1.6,
+              backgroundColor: '#ffffff',
+              color: '#0f172a',
+            }}
+          >
+            <colgroup>
+              <col style={{ width: '3.5%' }} />
+              <col style={{ width: '7.5%' }} />
+              <col style={{ width: '6%' }} />
+              <col style={{ width: '6.5%' }} />
+              <col style={{ width: '13%' }} />
+              <col style={{ width: '7%' }} />
+              <col style={{ width: '7%' }} />
+              <col style={{ width: '5%' }} />
+              <col style={{ width: '6%' }} />
+              <col style={{ width: '6%' }} />
+              <col style={{ width: '8.5%' }} />
+              <col style={{ width: '8.5%' }} />
+              <col style={{ width: '8.5%' }} />
+              <col style={{ width: '7%' }} />
+            </colgroup>
             <thead>
-              <tr style={{ background: '#f1f5f9', textAlign: 'center' }}>
-                <th style={{ border: '1px solid #94a3b8', padding: '5px' }}>ক্রমিক</th>
-                <th style={{ border: '1px solid #94a3b8', padding: '5px' }}>তারিখ</th>
-                <th style={{ border: '1px solid #94a3b8', padding: '5px' }}>বার</th>
-                <th style={{ border: '1px solid #94a3b8', padding: '5px' }}>সময়</th>
-                <th style={{ border: '1px solid #94a3b8', padding: '5px' }}>গাড়ি নাম্বার</th>
-                <th style={{ border: '1px solid #94a3b8', padding: '5px' }}>দিক</th>
-                <th style={{ border: '1px solid #94a3b8', padding: '5px', textAlign: 'left' }}>রুট</th>
-                <th style={{ border: '1px solid #94a3b8', padding: '5px' }}>সুপারভাইজার</th>
-                <th style={{ border: '1px solid #94a3b8', padding: '5px' }}>ড্রাইভার</th>
-                <th style={{ border: '1px solid #94a3b8', padding: '5px' }}>মোট কিমি</th>
-                <th style={{ border: '1px solid #94a3b8', padding: '5px' }}>নির্ধারিত</th>
-                <th style={{ border: '1px solid #94a3b8', padding: '5px' }}>প্রদানকৃত</th>
-                <th style={{ border: '1px solid #94a3b8', padding: '5px', textAlign: 'right' }}>মোট টাকা</th>
-                <th style={{ border: '1px solid #94a3b8', padding: '5px' }}>ফুয়েল +/-</th>
+              <tr style={{ backgroundColor: '#e2e8f0', textAlign: 'center', color: '#0f172a', fontWeight: 700 }}>
+                <th style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 5px', lineHeight: 1.5 }}>ক্র.</th>
+                <th style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 5px', lineHeight: 1.5 }}>তারিখ ও বার</th>
+                <th style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 5px', lineHeight: 1.5 }}>সময়</th>
+                <th style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 5px', lineHeight: 1.5 }}>গাড়ি</th>
+                <th style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 5px', lineHeight: 1.5, textAlign: 'left' }}>রুট</th>
+                <th style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 5px', lineHeight: 1.5 }}>সুপারভাইজার</th>
+                <th style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 5px', lineHeight: 1.5 }}>ড্রাইভার</th>
+                <th style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 5px', lineHeight: 1.5 }}>কিমি</th>
+                <th style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 5px', lineHeight: 1.5 }}>নির্ধারিত (লি.)</th>
+                <th style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 5px', lineHeight: 1.5 }}>প্রদান (লি.)</th>
+                <th style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 5px', lineHeight: 1.5, textAlign: 'right' }}>নির্ধারিত মূল্য</th>
+                <th style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 5px', lineHeight: 1.5, textAlign: 'right' }}>প্রদানকৃত মূল্য</th>
+                <th style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 5px', lineHeight: 1.5, textAlign: 'right' }}>+/- মূল্য</th>
+                <th style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 5px', lineHeight: 1.5 }}>ফুয়েল +/-</th>
               </tr>
             </thead>
             <tbody>
-              {filteredFuelEntries.map((entry, idx) => (
-                <tr key={entry.id} style={{ textAlign: 'center' }}>
-                  <td style={{ border: '1px solid #94a3b8', padding: '4px' }}>{toBengaliDigits(idx + 1)}</td>
-                  <td style={{ border: '1px solid #94a3b8', padding: '4px' }}>{toBengaliDigits(entry.date)}</td>
-                  <td style={{ border: '1px solid #94a3b8', padding: '4px' }}>{entry.dayOfWeek}</td>
-                  <td style={{ border: '1px solid #94a3b8', padding: '4px' }}>{entry.time}</td>
-                  <td style={{ border: '1px solid #94a3b8', padding: '4px', fontWeight: 'bold' }}>{entry.vehicleRegNo}</td>
-                  <td style={{ border: '1px solid #94a3b8', padding: '4px' }}>{entry.direction}</td>
-                  <td style={{ border: '1px solid #94a3b8', padding: '4px', textAlign: 'left' }}>{entry.route}</td>
-                  <td style={{ border: '1px solid #94a3b8', padding: '4px' }}>{entry.supervisor}</td>
-                  <td style={{ border: '1px solid #94a3b8', padding: '4px' }}>{entry.driver}</td>
-                  <td style={{ border: '1px solid #94a3b8', padding: '4px', fontWeight: 'bold' }}>{toBengaliDigits(entry.totalKm)}</td>
-                  <td style={{ border: '1px solid #94a3b8', padding: '4px' }}>{toBengaliDigits(entry.expectedFuelLiters)}</td>
-                  <td style={{ border: '1px solid #94a3b8', padding: '4px', fontWeight: 'bold' }}>{toBengaliDigits(entry.actualFuelLiters)}</td>
-                  <td style={{ border: '1px solid #94a3b8', padding: '4px', textAlign: 'right', fontWeight: 'bold' }}>৳{toBengaliDigits(entry.totalCost)}</td>
-                  <td style={{ border: '1px solid #94a3b8', padding: '4px' }}>{toBengaliDigits(entry.fuelDifference)}</td>
-                </tr>
-              ))}
-              <tr style={{ background: '#e2e8f0', fontWeight: 'bold', textAlign: 'center' }}>
-                <td colSpan={9} style={{ border: '1px solid #94a3b8', padding: '6px', textAlign: 'right' }}>
-                  সর্বমোট ({toBengaliDigits(filteredFuelEntries.length)} টি গাড়ি):
-                </td>
-                <td style={{ border: '1px solid #94a3b8', padding: '6px' }}>
-                  {toBengaliDigits(filteredFuelEntries.reduce((acc, c) => acc + c.totalKm, 0))} কিমি
-                </td>
-                <td style={{ border: '1px solid #94a3b8', padding: '6px' }}>-</td>
-                <td style={{ border: '1px solid #94a3b8', padding: '6px' }}>
-                  {toBengaliDigits(filteredFuelEntries.reduce((acc, c) => acc + c.actualFuelLiters, 0).toFixed(1))} লিটার
-                </td>
-                <td style={{ border: '1px solid #94a3b8', padding: '6px', textAlign: 'right' }}>
-                  ৳{toBengaliDigits(filteredFuelEntries.reduce((acc, c) => acc + c.totalCost, 0))}
-                </td>
-                <td style={{ border: '1px solid #94a3b8', padding: '6px' }}>-</td>
-              </tr>
+              {filteredFuelEntries.map((entry, idx) => {
+                const costs = getFuelEntryCosts(entry);
+                return (
+                  <tr
+                    key={entry.id}
+                    style={{
+                      textAlign: 'center',
+                      backgroundColor: idx % 2 === 1 ? '#f8fafc' : '#ffffff',
+                      color: '#0f172a',
+                    }}
+                  >
+                    <td style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '7px 5px', lineHeight: 1.6, fontWeight: 700 }}>
+                      {toBengaliDigits(idx + 1)}
+                    </td>
+                    <td style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '7px 5px', lineHeight: 1.6 }}>
+                      <div>{toBengaliDigits(entry.date)}</div>
+                      <div style={{ fontSize: '9px', color: '#475569' }}>{entry.dayOfWeek || getBengaliDayOfWeek(entry.date)}</div>
+                    </td>
+                    <td style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '7px 5px', lineHeight: 1.6 }}>
+                      {formatBengaliTime(entry.time)}
+                    </td>
+                    <td style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '7px 5px', lineHeight: 1.6, fontWeight: 800 }}>
+                      {entry.vehicleRegNo}
+                    </td>
+                    <td style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '7px 5px', lineHeight: 1.6, textAlign: 'left', fontWeight: 600 }}>
+                      {entry.route}
+                    </td>
+                    <td style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '7px 5px', lineHeight: 1.6 }}>
+                      {entry.supervisor}
+                    </td>
+                    <td style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '7px 5px', lineHeight: 1.6 }}>
+                      {entry.driver}
+                    </td>
+                    <td style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '7px 5px', lineHeight: 1.6, fontWeight: 700 }}>
+                      {toBengaliDigits(entry.totalKm)}
+                    </td>
+                    <td style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '7px 5px', lineHeight: 1.6 }}>
+                      {toBengaliDigits(entry.expectedFuelLiters)}
+                    </td>
+                    <td style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '7px 5px', lineHeight: 1.6, fontWeight: 800 }}>
+                      {toBengaliDigits(entry.actualFuelLiters)}
+                    </td>
+                    <td style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '7px 5px', lineHeight: 1.6, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                      {formatTaka(costs.expectedCost)}
+                    </td>
+                    <td style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '7px 5px', lineHeight: 1.6, textAlign: 'right', fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>
+                      {formatTaka(costs.actualCost)}
+                    </td>
+                    <td
+                      style={{
+                        borderRight: '1px solid #475569',
+                        borderBottom: '1px solid #475569',
+                        padding: '7px 5px',
+                        lineHeight: 1.6,
+                        textAlign: 'right',
+                        fontWeight: 800,
+                        fontVariantNumeric: 'tabular-nums',
+                        color: costs.costDiff > 0 ? '#065f46' : costs.costDiff < 0 ? '#b91c1c' : '#0f172a',
+                      }}
+                    >
+                      {formatSignedFuelCostDiff(costs.costDiff)}
+                    </td>
+                    <td style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '7px 5px', lineHeight: 1.6 }}>
+                      {toBengaliDigits(entry.fuelDifference > 0 ? `+${entry.fuelDifference}` : entry.fuelDifference)}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
+            <tfoot>
+              <tr style={{ backgroundColor: '#e2e8f0', fontWeight: 800, textAlign: 'center', color: '#0f172a' }}>
+                <td colSpan={7} style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 6px', lineHeight: 1.6, textAlign: 'right' }}>
+                  সর্বমোট ({toBengaliDigits(filteredFuelEntries.length)} টি এন্ট্রি):
+                </td>
+                <td style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 5px', lineHeight: 1.6 }}>
+                  {toBengaliDigits(fuelTotals.km)} কিমি
+                </td>
+                <td style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 5px', lineHeight: 1.6 }}>
+                  {toBengaliDigits(fuelTotals.expectedLiters.toFixed(1))} লি.
+                </td>
+                <td style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 5px', lineHeight: 1.6 }}>
+                  {toBengaliDigits(fuelTotals.actualLiters.toFixed(1))} লি.
+                </td>
+                <td style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 5px', lineHeight: 1.6, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                  {formatTaka(fuelTotals.expectedCost)}
+                </td>
+                <td style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 5px', lineHeight: 1.6, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                  {formatTaka(fuelTotals.actualCost)}
+                </td>
+                <td
+                  style={{
+                    borderRight: '1px solid #475569',
+                    borderBottom: '1px solid #475569',
+                    padding: '8px 5px',
+                    lineHeight: 1.6,
+                    textAlign: 'right',
+                    fontVariantNumeric: 'tabular-nums',
+                    color: fuelTotals.costDiff > 0 ? '#065f46' : fuelTotals.costDiff < 0 ? '#b91c1c' : '#0f172a',
+                  }}
+                >
+                  {formatSignedFuelCostDiff(fuelTotals.costDiff)}
+                </td>
+                <td style={{ borderRight: '1px solid #475569', borderBottom: '1px solid #475569', padding: '8px 5px', lineHeight: 1.6 }}>
+                  -
+                </td>
+              </tr>
+            </tfoot>
           </table>
-
-          {/* Footer Signature */}
-          <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '30px', paddingTop: '15px', borderTop: '1px solid #cbd5e1' }}>
-            <div style={{ fontSize: '10px', color: '#64748b' }}>
-              প্রিন্ট সময়: {new Date().toLocaleString('bn-BD')}
-            </div>
-            <div style={{ textAlign: 'right' }}>
-              <div style={{ borderTop: '2px solid #0f172a', display: 'inline-block', minWidth: '220px', textAlign: 'center', paddingTop: '4px', fontWeight: 'bold', fontSize: '12px' }}>
-                প্রত্যায়নকারী : ____________________
-              </div>
-            </div>
-          </div>
         </div>
       </div>
+
+      <OwnerWhatsAppModal
+        isOpen={showWhatsAppModal}
+        onClose={() => setShowWhatsAppModal(false)}
+        companyName={user?.company?.name || 'কাউন্টার টিকেটিং'}
+        reportTitle="ফুয়েল লগ ও +/- মূল্য হিসাব"
+        dateLabel={`${toBengaliDigits(startDate)} থেকে ${toBengaliDigits(endDate)}`}
+        items={whatsappOwnerItems}
+      />
     </div>
   );
 };

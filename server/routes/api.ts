@@ -192,13 +192,14 @@ apiRouter.post('/auth/login', (req, res) => {
   const token = createSession(sanitizedUser);
 
   db.logAudit({
+    companyId: sanitizedUser.companyId,
     userId: sanitizedUser.id,
     userName: sanitizedUser.name,
     role: sanitizedUser.role,
     actionType: 'LOGIN',
     entityType: 'USER',
     entityId: sanitizedUser.id,
-    details: `${sanitizedUser.name} (${sanitizedUser.role}) সফলভাবে সিস্টেমে প্রবেশ করেছেন।`,
+    details: `${sanitizedUser.name} সফলভাবে সিস্টেমে প্রবেশ করেছেন।`,
   });
 
     const companyObj = company
@@ -222,6 +223,35 @@ apiRouter.post('/auth/login', (req, res) => {
       company: companyObj,
     });
   });
+
+// Reset Admin credentials endpoint for quick recovery if login fails
+apiRouter.post('/auth/reset-admin', (req, res) => {
+  let adminUser = db.getUsers().find((u) => u.loginId.toLowerCase() === 'admin');
+  const salt = generateSalt();
+  const pinHash = hashPin('1234', salt);
+
+  if (adminUser) {
+    adminUser.status = 'active';
+    adminUser.role = 'super_admin';
+    adminUser.pinSalt = salt;
+    adminUser.pinHash = pinHash;
+  } else {
+    adminUser = {
+      id: 'usr-01',
+      loginId: 'admin',
+      name: 'মাস্টার এডমিন (Data&Code)',
+      role: 'super_admin',
+      phone: '01700-000000',
+      status: 'active',
+      pinHash,
+      pinSalt: salt,
+      createdAt: new Date().toISOString(),
+    };
+    db.getUsers().push(adminUser);
+  }
+  db.save();
+  res.json({ success: true, message: 'মাস্টার এডমিন অ্যাকাউন্ট সফলভাবে রিসেট করা হয়েছে। আইডি: admin, পিন: 1234' });
+});
 
 // Current User Profile
 apiRouter.get('/auth/me', authMiddleware, (req: AuthenticatedRequest, res) => {
@@ -256,30 +286,107 @@ apiRouter.post('/auth/logout', (req, res) => {
   res.json({ success: true, message: 'সফলভাবে লগআউট সম্পন্ন হয়েছে।' });
 });
 
-// List Users (Master Admin, Company Admin and Moderator)
+// Self-Service Update Own Login ID & PIN (Super Admin, Company Master Admin & All Users)
+apiRouter.put('/auth/credentials', authMiddleware, (req: AuthenticatedRequest, res) => {
+  try {
+    const { currentPin, newLoginId, newPin } = req.body || {};
+    const updatedUser = db.updateOwnCredentials(req.user!.id, {
+      currentPin,
+      newLoginId,
+      newPin,
+    });
+
+    const company = updatedUser.companyId
+      ? db.getCompanies().find((c) => c.id === updatedUser.companyId)
+      : undefined;
+    const companyObj = company
+      ? {
+          id: company.id,
+          name: company.name,
+          logoUrl: company.logoUrl,
+          address: company.address,
+          phone: company.phone,
+          subscriptionExpiry: company.subscriptionExpiry,
+          status: company.status,
+        }
+      : undefined;
+
+    const enrichedUser: User = { ...updatedUser, company: companyObj };
+
+    // Issue fresh session token reflecting any updated loginId and invalidate old one
+    const authHeader = req.headers.authorization;
+    const oldToken = authHeader && authHeader.startsWith('Bearer ') ? authHeader.split(' ')[1] : undefined;
+    const newToken = createSession(enrichedUser);
+    if (oldToken) {
+      destroySession(oldToken);
+    }
+
+    db.logAudit({
+      companyId: enrichedUser.companyId,
+      userId: enrichedUser.id,
+      userName: enrichedUser.name,
+      role: enrichedUser.role,
+      actionType: 'UPDATE_CREDENTIALS',
+      entityType: 'USER',
+      entityId: enrichedUser.id,
+      details: `${enrichedUser.name} নিজস্ব লগইন তথ্য (আইডি/পিন) নিরাপদভাবে আপডেট করেছেন।`,
+    });
+
+    res.json({
+      success: true,
+      token: newToken,
+      user: enrichedUser,
+      message: 'আপনার লগইন আইডি ও পিন সফলভাবে পরিবর্তন হয়েছে!',
+    });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || 'লগইন তথ্য পরিবর্তন করা যায়নি।' });
+  }
+});
+
+// List Users (Super Admin, Company Admin, Master Admin and Moderator)
 apiRouter.get(
   '/users',
   authMiddleware,
   requireRole(['super_admin', 'master_admin', 'company_admin', 'moderator']),
   (req: AuthenticatedRequest, res) => {
-    const companyId = getRequestCompanyId(req);
-    const users = db.getUsers(companyId).map((u) => {
-      const counter = db.getCounters().find((c) => c.id === u.counterId);
-      return {
-        id: u.id,
-        loginId: u.loginId,
-        name: u.name,
-        role: u.role,
-        companyId: u.companyId,
-        counterId: u.counterId,
-        counterName: counter?.name,
-        counterCode: counter?.code,
-        counterColor: counter?.seatColor,
-        phone: u.phone,
-        status: u.status,
-        createdAt: u.createdAt,
-      };
-    });
+    const isPlatformSuperAdmin = req.user!.role === 'super_admin' && !req.user!.companyId;
+    const companyId = isPlatformSuperAdmin ? getRequestCompanyId(req) : req.user!.companyId;
+
+    if (!isPlatformSuperAdmin && !companyId) {
+      return res.json({ users: [] });
+    }
+
+    const users = db
+      .getUsers(companyId)
+      .filter((u) => {
+        // Non-super-admin users NEVER see super_admin accounts
+        if (!isPlatformSuperAdmin && u.role === 'super_admin') return false;
+        return true;
+      })
+      .map((u) => {
+        const counter = db.getCounters().find((c) => c.id === u.counterId);
+        // Super Admin cannot inspect any company master/admin's changed Login ID
+        const hideIdFromViewer =
+          isPlatformSuperAdmin &&
+          u.id !== req.user!.id &&
+          (u.role === 'company_admin' || u.role === 'master_admin');
+
+        return {
+          id: u.id,
+          loginId: hideIdFromViewer ? '••••••••' : u.loginId,
+          isCredentialHidden: hideIdFromViewer,
+          name: u.name,
+          role: u.role,
+          companyId: u.companyId,
+          counterId: u.counterId,
+          counterName: counter?.name,
+          counterCode: counter?.code,
+          counterColor: counter?.seatColor,
+          phone: u.phone,
+          status: u.status,
+          createdAt: u.createdAt,
+        };
+      });
     res.json({ users });
   }
 );
@@ -293,6 +400,10 @@ apiRouter.post(
     const { loginId, name, role, counterId, phone, pin } = req.body;
     if (!loginId || !name || !role || !pin) {
       return res.status(400).json({ error: 'সকল প্রয়োজনীয় তথ্য প্রদান করুন।' });
+    }
+
+    if (role === 'super_admin') {
+      return res.status(403).json({ error: 'সুপার এডমিন রোল তৈরি করার অনুমতি নেই।' });
     }
 
     if (pin.length < 4 || pin.length > 6) {
@@ -331,6 +442,7 @@ apiRouter.post(
     db.save();
 
     db.logAudit({
+      companyId: targetCompanyId,
       userId: req.user!.id,
       userName: req.user!.name,
       role: req.user!.role,
@@ -340,9 +452,11 @@ apiRouter.post(
       details: `নতুন ব্যবহারকারী "${newUser.name}" (${newUser.role}) তৈরি করা হয়েছে।`,
     });
 
-    res.json({ success: true, user: newUser });
+    const { pinHash: _ph, pinSalt: _ps, ...safeUser } = newUser;
+    res.json({ success: true, user: safeUser });
   }
 );
+
 // Update User (Super Admin, Master Admin or Company Admin)
 apiRouter.put(
   '/users/:id',
@@ -356,8 +470,18 @@ apiRouter.put(
       return res.status(404).json({ error: 'ব্যবহারকারী খুঁজে পাওয়া যায়নি।' });
     }
 
+    const isPlatformSuperAdmin = req.user!.role === 'super_admin' && !req.user!.companyId;
+    if (!isPlatformSuperAdmin) {
+      if (user.role === 'super_admin' || user.companyId !== req.user!.companyId) {
+        return res.status(403).json({ error: 'অন্য কোনো একাউন্ট বা কোম্পানির ইউজার পরিবর্তনের অনুমতি নেই।' });
+      }
+      if (role === 'super_admin') {
+        return res.status(403).json({ error: 'অননুমোদিত রোল পরিবর্তন।' });
+      }
+    }
+
     if (name) user.name = name.trim();
-    if (role) user.role = role;
+    if (role && role !== 'super_admin') user.role = role;
     if (counterId !== undefined) {
       user.counterId = counterId || undefined;
       const counter = db.getCounters().find((c) => c.id === counterId);
@@ -376,6 +500,7 @@ apiRouter.put(
     db.save();
 
     db.logAudit({
+      companyId: user.companyId,
       userId: req.user!.id,
       userName: req.user!.name,
       role: req.user!.role,
@@ -385,7 +510,8 @@ apiRouter.put(
       details: `ব্যবহারকারী "${user.name}" এর তথ্য আপডেট করা হয়েছে।`,
     });
 
-    res.json({ success: true, user });
+    const { pinHash: _ph, pinSalt: _ps, ...safeUser } = user;
+    res.json({ success: true, user: safeUser });
   }
 );
 
@@ -396,15 +522,25 @@ apiRouter.delete(
   requireRole(['super_admin', 'master_admin', 'company_admin']),
   (req: AuthenticatedRequest, res) => {
     try {
+      const targetUser = db.getUsers().find((u) => u.id === req.params.id);
+      if (!targetUser) {
+        return res.status(404).json({ error: 'ব্যবহারকারী খুঁজে পাওয়া যায়নি।' });
+      }
+      const isPlatformSuperAdmin = req.user!.role === 'super_admin' && !req.user!.companyId;
+      if (!isPlatformSuperAdmin && (targetUser.role === 'super_admin' || targetUser.companyId !== req.user!.companyId)) {
+        return res.status(403).json({ error: 'এই ব্যবহারকারীকে মুছে ফেলার অনুমতি নেই।' });
+      }
+
       const deleted = db.deleteUser(req.params.id);
       db.logAudit({
+        companyId: deleted.companyId,
         userId: req.user!.id,
         userName: req.user!.name,
         role: req.user!.role,
         actionType: 'DELETE_USER',
         entityType: 'USER',
         entityId: req.params.id,
-        details: `ব্যবহারকারী "${deleted.name}" (${deleted.loginId}) মুছে ফেলা হয়েছে।`,
+        details: `ব্যবহারকারী "${deleted.name}" মুছে ফেলা হয়েছে।`,
       });
       res.json({ success: true, message: 'ব্যবহারকারী সফলভাবে মুছে ফেলা হয়েছে।' });
     } catch (err: any) {
@@ -417,28 +553,29 @@ apiRouter.delete(
 // 1.1 COMPANY MANAGEMENT & SUBSCRIPTIONS
 // ==========================================
 
-apiRouter.get('/companies/public', (req, res) => {
-  const companies = db.getCompanies().map((c) => ({
-    id: c.id,
-    name: c.name,
-    logoUrl: c.logoUrl,
-    address: c.address,
-    phone: c.phone,
-    adminLoginId: c.adminLoginId,
-    status: c.status,
-  }));
-  res.json({ companies });
+apiRouter.get('/companies/public', (_req, res) => {
+  // Never enumerate registered companies or expose adminLoginId publicly on the login page
+  res.json({ companies: [] });
 });
 
-apiRouter.get('/companies', authMiddleware, (req, res) => {
-  const companies = db.getCompanies().map(({ adminPinHash, adminPinSalt, ...c }) => c);
-  res.json({ companies });
+apiRouter.get('/companies', authMiddleware, (req: AuthenticatedRequest, res) => {
+  const isPlatformSuperAdmin = req.user?.role === 'super_admin' && !req.user?.companyId;
+  const allCompanies = db.getCompanies();
+  const visibleCompanies = isPlatformSuperAdmin
+    ? allCompanies
+    : allCompanies.filter((c) => c.id === req.user?.companyId);
+
+  const sanitized = visibleCompanies.map(({ adminPinHash, adminPinSalt, adminLoginId, ...c }) => ({
+    ...c,
+    adminLoginId: '',
+  }));
+  res.json({ companies: sanitized });
 });
 
 apiRouter.post(
   '/companies',
   authMiddleware,
-  requireRole(['master_admin', 'super_admin']),
+  requireRole(['super_admin']),
   (req: AuthenticatedRequest, res) => {
     const { name, logoUrl, address, phone, subscriptionExpiry, adminLoginId, pin } = req.body;
     if (!name || !adminLoginId || !pin || !subscriptionExpiry) {
@@ -463,10 +600,11 @@ apiRouter.post(
         actionType: 'CREATE_COMPANY',
         entityType: 'COMPANY',
         entityId: company.id,
-        details: `নতুন কোম্পানি "${company.name}" (এডমিন: ${company.adminLoginId}) তৈরি করা হয়েছে। সাবস্ক্রিপশন মেয়াদ: ${company.subscriptionExpiry}`,
+        details: `নতুন কোম্পানি "${company.name}" তৈরি করা হয়েছে। সাবস্ক্রিপশন মেয়াদ: ${company.subscriptionExpiry}`,
       });
 
-      res.json({ success: true, company });
+      const { adminPinHash: _h, adminPinSalt: _s, adminLoginId: _id, ...safeCompany } = company;
+      res.json({ success: true, company: { ...safeCompany, adminLoginId: '' } });
     } catch (err: any) {
       res.status(400).json({ error: err.message || 'কোম্পানি তৈরিতে সমস্যা হয়েছে।' });
     }
@@ -476,7 +614,7 @@ apiRouter.post(
 apiRouter.put(
   '/companies/:id',
   authMiddleware,
-  requireRole(['master_admin', 'super_admin']),
+  requireRole(['super_admin']),
   (req: AuthenticatedRequest, res) => {
     try {
       const updated = db.updateCompany(req.params.id, req.body);
@@ -489,21 +627,54 @@ apiRouter.put(
         entityId: updated.id,
         details: `কোম্পানি "${updated.name}" এর সাবস্ক্রিপশন ও তথ্য আপডেট করা হয়েছে।`,
       });
-      res.json({ success: true, company: updated });
+      const { adminPinHash: _h, adminPinSalt: _s, adminLoginId: _id, ...safeCompany } = updated;
+      res.json({ success: true, company: { ...safeCompany, adminLoginId: '' } });
     } catch (err: any) {
       res.status(400).json({ error: err.message });
     }
   }
 );
 
+apiRouter.get(
+  '/companies/:id/stats',
+  authMiddleware,
+  requireRole(['super_admin']),
+  (req: AuthenticatedRequest, res) => {
+    const comp = db.getCompanies().find((c) => c.id === req.params.id);
+    if (!comp) {
+      return res.status(404).json({ error: 'কোম্পানি খুঁজে পাওয়া যায়নি।' });
+    }
+    res.json({
+      success: true,
+      company: { id: comp.id, name: comp.name },
+      stats: db.getCompanyStats(req.params.id),
+    });
+  }
+);
+
 apiRouter.delete(
   '/companies/:id',
   authMiddleware,
-  requireRole(['master_admin', 'super_admin']),
+  requireRole(['super_admin']),
   (req: AuthenticatedRequest, res) => {
     try {
-      db.deleteCompany(req.params.id);
-      res.json({ success: true, message: 'কোম্পানি সফলভাবে মুছে ফেলা হয়েছে।' });
+      const { deletedName, removedCount } = db.deleteCompany(req.params.id);
+      db.logAudit({
+        userId: req.user!.id,
+        userName: req.user!.name,
+        role: req.user!.role,
+        actionType: 'DELETE_COMPANY',
+        entityType: 'COMPANY',
+        entityId: req.params.id,
+        details: `কোম্পানি "${deletedName}" এবং এর সংশ্লিষ্ট ${removedCount} টি রেকর্ড নিরাপদভাবে মুছে ফেলা হয়েছে।`,
+      });
+      res.json({
+        success: true,
+        deletedId: req.params.id,
+        deletedName,
+        removedCount,
+        message: `কোম্পানি "${deletedName}" এবং এর সকল ডাটা সফলভাবে মুছে ফেলা হয়েছে।`,
+      });
     } catch (err: any) {
       res.status(400).json({ error: err.message });
     }
@@ -516,11 +687,23 @@ apiRouter.delete(
 
 apiRouter.get('/counters', authMiddleware, (req: AuthenticatedRequest, res) => {
   const companyId = getRequestCompanyId(req);
+  const isPlatformSuperAdmin = req.user?.role === 'super_admin' && !req.user?.companyId;
   const users = db.getUsers(companyId);
   const countersWithUsers = db.getCounters(companyId).map((counter) => {
     const assignedUsers = users
       .filter((u) => u.counterId === counter.id)
-      .map((u) => ({ id: u.id, name: u.name, loginId: u.loginId, phone: u.phone }));
+      .map((u) => {
+        const hideId =
+          isPlatformSuperAdmin &&
+          u.id !== req.user?.id &&
+          (u.role === 'company_admin' || u.role === 'master_admin');
+        return {
+          id: u.id,
+          name: u.name,
+          loginId: hideId ? '••••••••' : u.loginId,
+          phone: u.phone,
+        };
+      });
     return {
       ...counter,
       assignedUsers,
@@ -873,22 +1056,40 @@ apiRouter.post(
     if (!canManageSchedules(req.user)) {
       return res.status(403).json({ error: 'শুধুমাত্র এডমিন বা অনুমোদিত ব্যবহারকারী সুপারভাইজার যুক্ত করতে পারেন।' });
     }
-    const { name, phone } = req.body;
-    if (!name || !name.trim()) {
-      return res.status(400).json({ error: 'সুপারভাইজারের নাম আবশ্যক।' });
+    const { name, names } = req.body;
+    const rawList: string[] = Array.isArray(names)
+      ? names.map((n: any) => String(n || '').trim()).filter(Boolean)
+      : typeof name === 'string'
+      ? name.split(/[,،\n]+/).map((n) => n.trim()).filter(Boolean)
+      : [];
+
+    if (rawList.length === 0) {
+      return res.status(400).json({ error: 'কমপক্ষে একজন সুপারভাইজারের নাম আবশ্যক।' });
     }
     const companyId = resolveTargetCompanyId(req, req.body.companyId);
-    const supervisor = db.createSupervisor({ name, phone, companyId });
+    const { created, skippedCount } = db.createSupervisorsBulk(rawList, companyId);
+    if (created.length === 0) {
+      return res.status(400).json({ error: 'প্রদত্ত সুপারভাইজার নামগুলো ইতিমধ্যেই তালিকায় রয়েছে।' });
+    }
     db.logAudit({
       userId: req.user!.id,
       userName: req.user!.name,
       role: req.user!.role,
       actionType: 'CREATE_SUPERVISOR',
       entityType: 'SUPERVISOR',
-      entityId: supervisor.id,
-      details: `নতুন সুপারভাইজার "${supervisor.name}" যুক্ত করা হয়েছে।`,
+      entityId: created[0].id,
+      details:
+        created.length === 1
+          ? `নতুন সুপারভাইজার "${created[0].name}" যুক্ত করা হয়েছে।`
+          : `একসাথে ${created.length} জন সুপারভাইজার যুক্ত করা হয়েছে: ${created.map((s) => s.name).join(', ')}।`,
     });
-    res.json({ success: true, supervisor });
+    res.json({
+      success: true,
+      supervisor: created[0],
+      supervisors: created,
+      createdCount: created.length,
+      skippedCount,
+    });
   }
 );
 
@@ -987,22 +1188,40 @@ apiRouter.post(
     if (!canManageSchedules(req.user)) {
       return res.status(403).json({ error: 'শুধুমাত্র এডমিন বা অনুমোদিত ব্যবহারকারী ড্রাইভার যুক্ত করতে পারেন।' });
     }
-    const { name, phone } = req.body;
-    if (!name || !name.trim()) {
-      return res.status(400).json({ error: 'ড্রাইভারের নাম আবশ্যক।' });
+    const { name, names } = req.body;
+    const rawList: string[] = Array.isArray(names)
+      ? names.map((n: any) => String(n || '').trim()).filter(Boolean)
+      : typeof name === 'string'
+      ? name.split(/[,،\n]+/).map((n) => n.trim()).filter(Boolean)
+      : [];
+
+    if (rawList.length === 0) {
+      return res.status(400).json({ error: 'কমপক্ষে একজন ড্রাইভারের নাম আবশ্যক।' });
     }
     const companyId = resolveTargetCompanyId(req, req.body.companyId);
-    const driver = db.createDriver({ name, phone, companyId });
+    const { created, skippedCount } = db.createDriversBulk(rawList, companyId);
+    if (created.length === 0) {
+      return res.status(400).json({ error: 'প্রদত্ত ড্রাইভার নামগুলো ইতিমধ্যেই তালিকায় রয়েছে।' });
+    }
     db.logAudit({
       userId: req.user!.id,
       userName: req.user!.name,
       role: req.user!.role,
       actionType: 'CREATE_DRIVER',
       entityType: 'DRIVER' as any,
-      entityId: driver.id,
-      details: `নতুন ড্রাইভার "${driver.name}" যুক্ত করা হয়েছে।`,
+      entityId: created[0].id,
+      details:
+        created.length === 1
+          ? `নতুন ড্রাইভার "${created[0].name}" যুক্ত করা হয়েছে।`
+          : `একসাথে ${created.length} জন ড্রাইভার যুক্ত করা হয়েছে: ${created.map((d) => d.name).join(', ')}।`,
     });
-    res.json({ success: true, driver });
+    res.json({
+      success: true,
+      driver: created[0],
+      drivers: created,
+      createdCount: created.length,
+      skippedCount,
+    });
   }
 );
 
@@ -1850,6 +2069,9 @@ apiRouter.delete(
 // ==========================================
 
 apiRouter.post('/bookings', authMiddleware, (req: AuthenticatedRequest, res) => {
+  if (req.user?.role === 'fuel_manager' || req.user?.role === 'checker') {
+    return res.status(403).json({ error: 'আপনার রোল থেকে টিকিট বুকিং করার অনুমতি নেই।' });
+  }
   const {
     scheduleId,
     counterId,
@@ -1937,6 +2159,9 @@ apiRouter.post(
   '/bookings/:id/cancel',
   authMiddleware,
   (req: AuthenticatedRequest, res) => {
+    if (req.user?.role === 'fuel_manager' || req.user?.role === 'checker') {
+      return res.status(403).json({ error: 'আপনার রোল থেকে বুকিং বাতিল করার অনুমতি নেই।' });
+    }
     try {
       const cancelled = db.cancelBooking(req.params.id, {
         id: req.user!.id,
@@ -2376,9 +2601,14 @@ apiRouter.get('/reconciliations', authMiddleware, (req: AuthenticatedRequest, re
 // 8. AUDIT LOGS
 // ==========================================
 
-apiRouter.get('/audit-logs', authMiddleware, (req, res) => {
+apiRouter.get('/audit-logs', authMiddleware, (req: AuthenticatedRequest, res) => {
   const { actionType, limit } = req.query;
-  let logs = [...db.getAuditLogs()];
+  const isPlatformSuperAdmin = req.user?.role === 'super_admin' && !req.user?.companyId;
+  const companyId = isPlatformSuperAdmin ? getRequestCompanyId(req) : req.user?.companyId;
+  let logs = [...db.getAuditLogs(companyId)];
+  if (!isPlatformSuperAdmin) {
+    logs = logs.filter((l) => l.role !== 'super_admin');
+  }
   if (actionType) {
     logs = logs.filter((l) => l.actionType === actionType);
   }
@@ -2853,17 +3083,20 @@ ${promptContext}`,
 // 11. SYSTEM SETTINGS
 // ==========================================
 
-apiRouter.get('/settings', authMiddleware, (req, res) => {
-  res.json({ settings: db.getSettings() });
+apiRouter.get('/settings', authMiddleware, (req: AuthenticatedRequest, res) => {
+  const companyId = getRequestCompanyId(req);
+  res.json({ settings: db.getSettings(companyId) });
 });
 
 apiRouter.put(
   '/settings',
   authMiddleware,
-  requireRole(['master_admin']),
+  requireRole(['super_admin', 'company_admin', 'master_admin']),
   (req: AuthenticatedRequest, res) => {
-    const updated = db.updateSettings(req.body);
+    const companyId = getRequestCompanyId(req);
+    const updated = db.updateSettings(req.body, companyId);
     db.logAudit({
+      companyId,
       userId: req.user!.id,
       userName: req.user!.name,
       role: req.user!.role,
@@ -2890,7 +3123,7 @@ apiRouter.get('/fuel/settings', authMiddleware, (req: AuthenticatedRequest, res)
 apiRouter.post(
   '/fuel/settings',
   authMiddleware,
-  requireRole(['super_admin', 'master_admin', 'company_admin', 'moderator']),
+  requireRole(['super_admin', 'master_admin', 'company_admin', 'moderator', 'fuel_manager']),
   (req: AuthenticatedRequest, res) => {
     const companyId = resolveTargetCompanyId(req, req.body.companyId);
     const { commonMileage, fuelPricePerLiter } = req.body;
@@ -2938,7 +3171,7 @@ apiRouter.get('/fuel/entries', authMiddleware, (req: AuthenticatedRequest, res) 
 apiRouter.post(
   '/fuel/entries',
   authMiddleware,
-  requireRole(['super_admin', 'master_admin', 'company_admin', 'moderator']),
+  requireRole(['super_admin', 'master_admin', 'company_admin', 'moderator', 'fuel_manager']),
   (req: AuthenticatedRequest, res) => {
     const companyId = resolveTargetCompanyId(req, req.body.companyId);
     const body = req.body;
@@ -2946,6 +3179,27 @@ apiRouter.post(
     if (!body.vehicleRegNo || body.actualFuelLiters === undefined) {
       return res.status(400).json({ error: 'গাড়ি নাম্বার এবং তেলের পরিমাণ আবশ্যক।' });
     }
+
+    const totalKm = Number(body.totalKm) || 0;
+    const mileage = Number(body.mileage) || 4;
+    const expectedLiters =
+      body.expectedFuelLiters !== undefined
+        ? Number(body.expectedFuelLiters) || 0
+        : totalKm > 0 && mileage > 0
+        ? Number((totalKm / mileage).toFixed(2))
+        : 0;
+    const actualLiters = Number(body.actualFuelLiters) || 0;
+    const ratePerLiter = Number(body.fuelRatePerLiter) || 135.4;
+    const totalCost =
+      body.totalCost !== undefined ? Number(body.totalCost) : Math.round(actualLiters * ratePerLiter);
+    const expectedFuelCost =
+      body.expectedFuelCost !== undefined
+        ? Number(body.expectedFuelCost)
+        : Math.round(expectedLiters * ratePerLiter);
+    const fuelCostDifference =
+      body.fuelCostDifference !== undefined
+        ? Number(body.fuelCostDifference)
+        : expectedFuelCost - totalCost;
 
     const created = db.createFuelEntry({
       companyId,
@@ -2960,12 +3214,14 @@ apiRouter.post(
       route: body.route,
       supervisor: body.supervisor,
       driver: body.driver,
-      totalKm: Number(body.totalKm) || 0,
-      mileage: Number(body.mileage) || 4,
-      expectedFuelLiters: Number(body.expectedFuelLiters) || 0,
-      actualFuelLiters: Number(body.actualFuelLiters) || 0,
-      fuelRatePerLiter: Number(body.fuelRatePerLiter) || 135.4,
-      totalCost: Number(body.totalCost) || 0,
+      totalKm,
+      mileage,
+      expectedFuelLiters: expectedLiters,
+      actualFuelLiters: actualLiters,
+      fuelRatePerLiter: ratePerLiter,
+      totalCost,
+      expectedFuelCost,
+      fuelCostDifference,
       fuelDifference: Number(body.fuelDifference) || 0,
       notes: body.notes || '',
     });
@@ -2977,7 +3233,7 @@ apiRouter.post(
       actionType: 'CREATE_FUEL_ENTRY',
       entityType: 'FUEL',
       entityId: created.id,
-      details: `${created.vehicleRegNo} গাড়িতে ${created.actualFuelLiters} লিটার তেল এন্ট্রি করা হয়েছে। মোট: ৳${created.totalCost}`,
+      details: `${created.vehicleRegNo} গাড়িতে ${created.actualFuelLiters} লিটার তেল এন্ট্রি করা হয়েছে। মোট: ৳${created.totalCost} (নির্ধারিত: ৳${expectedFuelCost}, +/-: ৳${fuelCostDifference})`,
       newValues: created,
     });
 
@@ -2988,10 +3244,45 @@ apiRouter.post(
 apiRouter.put(
   '/fuel/entries/:id',
   authMiddleware,
-  requireRole(['super_admin', 'master_admin', 'company_admin', 'moderator']),
+  requireRole(['super_admin', 'master_admin', 'company_admin', 'moderator', 'fuel_manager']),
   (req: AuthenticatedRequest, res) => {
     const { id } = req.params;
-    const updated = db.updateFuelEntry(id, req.body);
+    const updates = { ...req.body };
+    const existing = db.getFuelEntries().find((f) => f.id === id);
+    if (!existing) {
+      return res.status(404).json({ error: 'ফুয়েল রেকর্ড পাওয়া যায়নি।' });
+    }
+    const expectedLiters =
+      updates.expectedFuelLiters !== undefined
+        ? Number(updates.expectedFuelLiters)
+        : existing.expectedFuelLiters;
+    const actualLiters =
+      updates.actualFuelLiters !== undefined
+        ? Number(updates.actualFuelLiters)
+        : existing.actualFuelLiters;
+    const rate =
+      updates.fuelRatePerLiter !== undefined
+        ? Number(updates.fuelRatePerLiter)
+        : existing.fuelRatePerLiter;
+    const totalCost =
+      updates.totalCost !== undefined
+        ? Number(updates.totalCost)
+        : Math.round(actualLiters * rate);
+    const expectedFuelCost =
+      updates.expectedFuelCost !== undefined
+        ? Number(updates.expectedFuelCost)
+        : Math.round(expectedLiters * rate);
+    const fuelCostDifference =
+      updates.fuelCostDifference !== undefined
+        ? Number(updates.fuelCostDifference)
+        : expectedFuelCost - totalCost;
+
+    const updated = db.updateFuelEntry(id, {
+      ...updates,
+      totalCost,
+      expectedFuelCost,
+      fuelCostDifference,
+    });
     if (!updated) {
       return res.status(404).json({ error: 'ফুয়েল রেকর্ড পাওয়া যায়নি।' });
     }
@@ -3002,7 +3293,7 @@ apiRouter.put(
 apiRouter.delete(
   '/fuel/entries/:id',
   authMiddleware,
-  requireRole(['super_admin', 'master_admin', 'company_admin', 'moderator']),
+  requireRole(['super_admin', 'master_admin', 'company_admin', 'moderator', 'fuel_manager']),
   (req: AuthenticatedRequest, res) => {
     const { id } = req.params;
     const ok = db.deleteFuelEntry(id);
@@ -3017,22 +3308,23 @@ apiRouter.delete(
 // 13. VAULT SYNC & AUTO-REHYDRATION
 // ==========================================
 
-apiRouter.get('/sync/status', (req, res) => {
+apiRouter.get('/sync/status', (_req, res) => {
   res.json({
     isEmptyFreshState: db.isEmptyFreshState(),
-    companiesCount: db.getCompanies().length,
-    vehiclesCount: db.getVehicles().length,
-    countersCount: db.getCounters().length,
-    routesCount: db.getRoutes().length,
-    schedulesCount: db.getSchedules().length,
-    bookingsCount: db.getBookings().length,
   });
 });
 
-apiRouter.get('/sync/vault', authMiddleware, (req, res) => {
+apiRouter.get('/sync/vault', authMiddleware, (req: AuthenticatedRequest, res) => {
+  const isPlatformSuperAdmin = req.user?.role === 'super_admin' && !req.user?.companyId;
+  const vault = isPlatformSuperAdmin
+    ? db.getVaultSnapshot()
+    : req.user?.companyId
+    ? db.getScopedVaultSnapshot(req.user.companyId)
+    : { companies: [], deletedCompanyIds: [], users: [] };
+
   res.json({
     success: true,
-    vault: db.getVaultSnapshot(),
+    vault,
     syncedAt: new Date().toISOString(),
   });
 });
@@ -3064,3 +3356,48 @@ apiRouter.post('/sync/rehydrate', (req, res) => {
     res.status(500).json({ error: err.message || 'ডাটা রিস্টোর ব্যর্থ হয়েছে।' });
   }
 });
+
+apiRouter.post(
+  '/sync/cleanup-orphans',
+  authMiddleware,
+  requireRole(['super_admin']),
+  (req: AuthenticatedRequest, res) => {
+    try {
+      const { removedCount } = db.purgeOrphanedCompanyRecords(true);
+      res.json({
+        success: true,
+        removedCount,
+        companiesCount: db.getCompanies().length,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'অবশিষ্ট ডাটা পরিষ্কার ব্যর্থ হয়েছে।' });
+    }
+  }
+);
+
+apiRouter.post(
+  '/sync/restore-backup',
+  authMiddleware,
+  requireRole(['super_admin']),
+  (req: AuthenticatedRequest, res) => {
+    const vault = req.body?.vault || req.body;
+    if (!vault || typeof vault !== 'object') {
+      return res.status(400).json({ error: 'সঠিক ব্যাকআপ ডাটা পাওয়া যায়নি।' });
+    }
+    try {
+      const result = db.restoreFullBackup(vault);
+      db.logAudit({
+        userId: req.user!.id,
+        userName: req.user!.name,
+        role: req.user!.role,
+        actionType: 'RESTORE_BACKUP',
+        entityType: 'SYSTEM',
+        entityId: 'vault',
+        details: `ব্যাকআপ ফাইল থেকে ${result.restoredCompanies} টি কোম্পানি ও মোট ${result.totalRestored} টি রেকর্ড রিস্টোর করা হয়েছে।`,
+      });
+      res.json({ success: true, ...result });
+    } catch (err: any) {
+      res.status(400).json({ error: err.message || 'ব্যাকআপ রিস্টোর ব্যর্থ হয়েছে।' });
+    }
+  }
+);

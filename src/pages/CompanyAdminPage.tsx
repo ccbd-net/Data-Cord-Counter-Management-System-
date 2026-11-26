@@ -23,6 +23,8 @@ import {
   Sparkles,
   ArrowRight,
   Lock,
+  HardDrive,
+  Database,
 } from 'lucide-react';
 
 export const CompanyAdminPage: React.FC = () => {
@@ -53,6 +55,14 @@ export const CompanyAdminPage: React.FC = () => {
   const [newPin, setNewPin] = useState<string>('');
   const [resetErrorMsg, setResetErrorMsg] = useState<string>('');
   const [resetSubmitting, setResetSubmitting] = useState<boolean>(false);
+
+  // In-App Delete Confirmation Modal State
+  const [deleteTargetCompany, setDeleteTargetCompany] = useState<Company | null>(null);
+  const [deleteStats, setDeleteStats] = useState<Record<string, number> | null>(null);
+  const [loadingDeleteStats, setLoadingDeleteStats] = useState<boolean>(false);
+  const [deletingCompany, setDeletingCompany] = useState<boolean>(false);
+  const [cleaningOrphans, setCleaningOrphans] = useState<boolean>(false);
+  const [savingLocal, setSavingLocal] = useState<boolean>(false);
 
   const fetchCompanies = async () => {
     setLoading(true);
@@ -99,7 +109,7 @@ export const CompanyAdminPage: React.FC = () => {
     setAddress(c.address || '');
     setPhone(c.phone || '');
     setSubscriptionExpiry(c.subscriptionExpiry || '');
-    setAdminLoginId(c.adminLoginId || '');
+    setAdminLoginId('');
     setPin('');
     setErrorMsg('');
     setIsModalOpen(true);
@@ -119,7 +129,7 @@ export const CompanyAdminPage: React.FC = () => {
           address,
           phone,
           subscriptionExpiry,
-          adminLoginId,
+          adminLoginId: adminLoginId.trim() ? adminLoginId.trim() : undefined,
           pin: pin.trim() ? pin.trim() : undefined,
         });
         setSuccessMsg(`কোম্পানি "${name}" এর সাবস্ক্রিপশন ও লোগো তথ্য সফলভাবে আপডেট হয়েছে!`);
@@ -170,19 +180,86 @@ export const CompanyAdminPage: React.FC = () => {
     }
   };
 
-  const handleDelete = async (c: Company) => {
-    if (!window.confirm(`আপনি কি নিশ্চিতভাবে "${c.name}" কোম্পানি মুছে ফেলতে চান?`)) {
-      return;
-    }
+  const openDeleteModal = async (c: Company) => {
+    setErrorMsg('');
+    setSuccessMsg('');
+    setDeleteTargetCompany(c);
+    setDeleteStats(null);
+    setLoadingDeleteStats(true);
     try {
-      await api.deleteCompany(c.id);
-      if (activeCompanyId === c.id) {
+      const res = await api.getCompanyStats(c.id);
+      setDeleteStats(res.stats || {});
+    } catch {
+      setDeleteStats({});
+    } finally {
+      setLoadingDeleteStats(false);
+    }
+  };
+
+  const confirmDeleteCompany = async () => {
+    if (!deleteTargetCompany) return;
+    setDeletingCompany(true);
+    setErrorMsg('');
+    setSuccessMsg('');
+    try {
+      const targetId = deleteTargetCompany.id;
+      const targetName = deleteTargetCompany.name;
+      const res = await api.deleteCompany(targetId);
+      if (activeCompanyId === targetId) {
         setActiveCompanyId(null);
       }
-      setSuccessMsg(`কোম্পানি "${c.name}" সফলভাবে মুছে ফেলা হয়েছে!`);
+      setDeleteTargetCompany(null);
+      setDeleteStats(null);
+      const removedLabel = res.removedCount
+        ? ` (সংশ্লিষ্ট ${toBengaliDigits(res.removedCount)} টি রেকর্ড সহ)`
+        : '';
+      setSuccessMsg(
+        `কোম্পানি "${targetName}"${removedLabel} নিরাপদভাবে মুছে ফেলা হয়েছে। অন্য কোনো কোম্পানির ডাটাবেইজে কোনো প্রভাব পড়েনি।`
+      );
       await fetchCompanies();
     } catch (err: any) {
       setErrorMsg(err.message || 'কোম্পানি মোছা যায়নি।');
+    } finally {
+      setDeletingCompany(false);
+    }
+  };
+
+  const handleCleanupOrphans = async () => {
+    setCleaningOrphans(true);
+    setErrorMsg('');
+    setSuccessMsg('');
+    try {
+      const res = await api.cleanupOrphans();
+      const totalCleaned = (res.serverRemoved || 0) + (res.browserRemoved || 0);
+      if (totalCleaned > 0) {
+        setSuccessMsg(
+          `পূর্ববর্তী মুছে ফেলা কোম্পানির অবশিষ্ট ${toBengaliDigits(totalCleaned)} টি অরফান রেকর্ড ও ক্যাশ সফলভাবে পরিষ্কার করা হয়েছে।`
+        );
+      } else {
+        setSuccessMsg('ডাটাবেইজ ও ব্রাউজার ক্যাশ সম্পূর্ণ পরিষ্কার রয়েছে — কোনো অরফান ডাটা পাওয়া যায়নি।');
+      }
+      await fetchCompanies();
+    } catch (err: any) {
+      setErrorMsg(err.message || 'অরফান ডাটা পরিষ্কার ব্যর্থ হয়েছে।');
+    } finally {
+      setCleaningOrphans(false);
+    }
+  };
+
+  const handleSaveToLocal = async () => {
+    setSavingLocal(true);
+    setErrorMsg('');
+    setSuccessMsg('');
+    try {
+      const stats = await api.saveToLocalStorage();
+      const sizeKb = Math.max(1, Math.round((stats.localStorageBytes || 0) / 1024));
+      setSuccessMsg(
+        `বর্তমান ${toBengaliDigits(stats.companies)} টি কোম্পানির সকল ডাটা (${toBengaliDigits(sizeKb)} KB) ব্রাউজারের লোকাল স্টোরেজে নিরাপদভাবে সংরক্ষণ করা হয়েছে!`
+      );
+    } catch (err: any) {
+      setErrorMsg(err.message || 'লোকাল স্টোরেজে ডাটা জমা করতে সমস্যা হয়েছে।');
+    } finally {
+      setSavingLocal(false);
     }
   };
 
@@ -310,8 +387,8 @@ export const CompanyAdminPage: React.FC = () => {
     const term = searchTerm.toLowerCase();
     return (
       c.name.toLowerCase().includes(term) ||
-      c.adminLoginId.toLowerCase().includes(term) ||
-      (c.phone && c.phone.includes(term))
+      (c.phone && c.phone.includes(term)) ||
+      (c.address && c.address.toLowerCase().includes(term))
     );
   });
 
@@ -339,25 +416,49 @@ export const CompanyAdminPage: React.FC = () => {
           </p>
         </div>
 
-        <div className="flex items-center gap-2.5">
+        <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
             onClick={fetchCompanies}
-            className="p-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl transition-colors"
+            className="p-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl transition-colors cursor-pointer"
             title="রিফ্রেশ"
           >
             <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
           </button>
 
           {isMasterAdmin && (
-            <button
-              type="button"
-              onClick={openAddModal}
-              className="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-sm transition-all shadow-purple-600/30 cursor-pointer"
-            >
-              <Plus className="w-4 h-4" />
-              <span>নতুন কোম্পানি ও সাবস্ক্রিপশন</span>
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={handleCleanupOrphans}
+                disabled={cleaningOrphans}
+                className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors whitespace-nowrap cursor-pointer disabled:opacity-60"
+                title="আগের মুছে যাওয়া কোম্পানির কোনো অরফান ডাটা বা ক্যাশ থাকলে পরিষ্কার করুন"
+              >
+                <Database className={`w-3.5 h-3.5 text-slate-600 ${cleaningOrphans ? 'animate-pulse' : ''}`} />
+                <span>{cleaningOrphans ? 'পরিষ্কার হচ্ছে...' : 'পুরানো ডাটা পরিষ্কার'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleSaveToLocal}
+                disabled={savingLocal}
+                className="px-3 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors whitespace-nowrap cursor-pointer disabled:opacity-60"
+                title="ডাটাবেইজের বর্তমান স্ন্যাপশট ব্রাউজার লোকাল স্টোরেজে জমা করুন"
+              >
+                <HardDrive className="w-3.5 h-3.5 text-emerald-600" />
+                <span>{savingLocal ? 'সংরক্ষণ হচ্ছে...' : 'লোকাল সেভ'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={openAddModal}
+                className="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-sm transition-all shadow-purple-600/30 whitespace-nowrap cursor-pointer"
+              >
+                <Plus className="w-4 h-4" />
+                <span>নতুন কোম্পানি ও সাবস্ক্রিপশন</span>
+              </button>
+            </>
           )}
         </div>
       </div>
@@ -431,7 +532,7 @@ export const CompanyAdminPage: React.FC = () => {
             type="text"
             value={searchTerm ?? ''}
             onChange={(e) => setSearchTerm(e.target.value)}
-            placeholder="কোম্পানির নাম, এডমিন আইডি দিয়ে খুঁজুন..."
+            placeholder="কোম্পানির নাম বা মোবাইল নম্বর দিয়ে খুঁজুন..."
             className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs outline-none focus:bg-white focus:ring-2 focus:ring-purple-500"
           />
         </div>
@@ -484,24 +585,18 @@ export const CompanyAdminPage: React.FC = () => {
                 {/* Card Top: Logo and Badges */}
                 <div className="flex items-start justify-between gap-3 pb-3 border-b border-slate-100">
                   <div className="flex items-center gap-3">
-                    {c.logoUrl ? (
-                      <img
-                        src={c.logoUrl}
-                        alt={c.name}
-                        className="w-12 h-12 rounded-2xl object-cover border border-slate-200 shadow-xs"
-                      />
-                    ) : (
-                      <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-purple-600 to-indigo-500 text-white font-black text-lg flex items-center justify-center shadow-xs">
-                        {c.name.slice(0, 2)}
-                      </div>
-                    )}
+                    <img
+                      src={c.logoUrl || '/logo.png'}
+                      alt={c.name}
+                      className="w-12 h-12 rounded-2xl object-cover border border-slate-200 shadow-xs bg-slate-900"
+                    />
                     <div>
                       <h3 className="font-bold text-slate-900 text-sm leading-snug">{c.name}</h3>
                       <div className="flex items-center gap-1.5 text-xs text-slate-500 mt-0.5">
-                        <KeyRound className="w-3.5 h-3.5 text-slate-400" />
-                        <span>এডমিন আইডি:</span>
-                        <span className="font-mono font-bold text-purple-700 bg-purple-50 px-1.5 py-0.2 rounded border border-purple-200">
-                          {c.adminLoginId}
+                        <Lock className="w-3.5 h-3.5 text-emerald-600" />
+                        <span>এডমিন লগইন:</span>
+                        <span className="font-bold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200">
+                          গোপন ও সুরক্ষিত
                         </span>
                       </div>
                     </div>
@@ -595,7 +690,7 @@ export const CompanyAdminPage: React.FC = () => {
                     type="button"
                     onClick={() => {
                       setResetModalCompany(c);
-                      setNewAdminLoginId(c.adminLoginId || '');
+                      setNewAdminLoginId('');
                       setNewPin('');
                       setResetErrorMsg('');
                     }}
@@ -614,9 +709,10 @@ export const CompanyAdminPage: React.FC = () => {
                   </button>
                   <button
                     type="button"
-                    onClick={() => handleDelete(c)}
-                    className="p-1.5 text-rose-500 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
-                    title="কোম্পানি মুছুন"
+                    onClick={() => openDeleteModal(c)}
+                    className="p-2 text-rose-600 hover:bg-rose-50 border border-transparent hover:border-rose-200 rounded-lg transition-colors cursor-pointer"
+                    title="কোম্পানি ও এর সব ডাটা নিরাপদভাবে মুছুন"
+                    aria-label={`${c.name} মুছুন`}
                   >
                     <Trash2 className="w-4 h-4" />
                   </button>
@@ -757,15 +853,15 @@ export const CompanyAdminPage: React.FC = () => {
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1">
-                    এডমিন লগইন আইডি *
+                    এডমিন লগইন আইডি {editingCompany ? '(রিসেট করতে চাইলে)' : '*'}
                   </label>
                   <input
                     type="text"
                     value={adminLoginId ?? ''}
                     onChange={(e) => setAdminLoginId(e.target.value)}
-                    placeholder="যেমন: admin01, transport01"
+                    placeholder={editingCompany ? 'অপরিবর্তিত রাখতে খালি রাখুন' : 'যেমন: admin01, transport01'}
                     className="w-full px-3 py-2 bg-slate-50 border rounded-xl text-xs font-mono font-bold outline-none focus:bg-white focus:ring-2 focus:ring-purple-500"
-                    required
+                    required={!editingCompany}
                   />
                 </div>
 
@@ -951,6 +1047,105 @@ export const CompanyAdminPage: React.FC = () => {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Safe Isolated Delete Confirmation Modal */}
+      {deleteTargetCompany && (
+        <div
+          className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="delete-company-title"
+        >
+          <div className="bg-white w-full max-w-md rounded-2xl shadow-2xl border border-slate-200 overflow-hidden">
+            <div className="px-5 py-4 bg-rose-600 text-white flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-white/15 flex items-center justify-center shrink-0">
+                  <AlertTriangle className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 id="delete-company-title" className="font-bold text-sm">
+                    কোম্পানি স্থায়ীভাবে মুছে ফেলার নিশ্চিতকরণ
+                  </h3>
+                  <div className="text-[11px] text-rose-100">{deleteTargetCompany.name}</div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => !deletingCompany && setDeleteTargetCompany(null)}
+                disabled={deletingCompany}
+                className="p-1.5 text-rose-100 hover:text-white rounded-lg hover:bg-white/10 transition-colors cursor-pointer disabled:opacity-50"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4">
+              <div className="text-xs text-slate-700 leading-relaxed">
+                আপনি কি নিশ্চিতভাবে <strong className="text-slate-900">"{deleteTargetCompany.name}"</strong> কোম্পানি ও এর অধীনস্থ সকল রেকর্ড মুছে ফেলতে চান?
+              </div>
+
+              <div className="bg-slate-50 rounded-xl border border-slate-200 p-3.5">
+                <div className="text-[11px] font-bold text-slate-600 mb-2.5">
+                  এই কোম্পানির সাথে যেসব নিজস্ব ডাটা মুছে যাবে:
+                </div>
+                {loadingDeleteStats ? (
+                  <div className="py-4 text-center text-xs text-slate-500 flex items-center justify-center gap-2">
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>ডাটাবেইজ রেকর্ড হিসাব করা হচ্ছে...</span>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-2 gap-2 text-xs">
+                    {[
+                      { label: 'ইউজার ও অপারেটর', val: deleteStats?.users || 0 },
+                      { label: 'কাউন্টার', val: deleteStats?.counters || 0 },
+                      { label: 'গাড়ি', val: deleteStats?.vehicles || 0 },
+                      { label: 'রুট', val: deleteStats?.routes || 0 },
+                      { label: 'ট্রিপ / শিডিউল', val: deleteStats?.schedules || 0 },
+                      { label: 'টিকিট বুকিং', val: deleteStats?.bookings || 0 },
+                      { label: 'ট্রিপ হিসাব সমন্বয়', val: deleteStats?.reconciliations || 0 },
+                      { label: 'ফুয়েল লগ এন্ট্রি', val: deleteStats?.fuelEntries || 0 },
+                    ].map((row) => (
+                      <div
+                        key={row.label}
+                        className="flex items-center justify-between px-2.5 py-1.5 bg-white rounded-lg border border-slate-200"
+                      >
+                        <span className="text-slate-600">{row.label}</span>
+                        <span className="font-bold text-slate-900 tabular-nums">
+                          {toBengaliDigits(row.val)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-[11px] text-emerald-800 font-medium leading-relaxed">
+                সুরক্ষা নিশ্চিত: কেবল এই কোম্পানির (<span className="font-mono">{deleteTargetCompany.id}</span>) নিজস্ব ডাটা ও ব্রাউজার ক্যাশ মুছে যাবে। অন্য কোনো কোম্পানির ডাটাবেইজ, টিকিট বা সুপার এডমিন অ্যাকাউন্টে কোনো প্রভাব পড়বে না।
+              </div>
+
+              <div className="pt-2 border-t border-slate-200 flex items-center justify-end gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => setDeleteTargetCompany(null)}
+                  disabled={deletingCompany}
+                  className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold whitespace-nowrap cursor-pointer disabled:opacity-50"
+                >
+                  বাতিল করুন
+                </button>
+                <button
+                  type="button"
+                  onClick={confirmDeleteCompany}
+                  disabled={deletingCompany || loadingDeleteStats}
+                  className="px-4 py-2.5 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold shadow-sm flex items-center gap-1.5 whitespace-nowrap cursor-pointer disabled:opacity-50"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>{deletingCompany ? 'মুছে ফেলা হচ্ছে...' : 'কোম্পানি ও সব ডাটা মুছুন'}</span>
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useAuth } from '../context/AuthContext.tsx';
 import { api } from '../services/api.ts';
 import type { Schedule, Vehicle, RouteItem, Driver } from '../types/index.ts';
@@ -15,9 +15,11 @@ import {
   resolveRouteNumber,
   parseDepartureTimeToMinutes,
 } from '../utils/routeSort.ts';
-import { downloadDailyTripsPDF } from '../utils/pdfGenerator.ts';
+import { downloadDailyTripsPDF, printElementById } from '../utils/pdfGenerator.ts';
 import { DigitalClockPicker } from '../components/DigitalClockPicker.tsx';
 import { ForwardUpTripsModal } from '../components/ForwardUpTripsModal.tsx';
+import { OwnerWhatsAppModal } from '../components/OwnerWhatsAppModal.tsx';
+import { normalizeRegNo, type OwnerReportSummaryItem } from '../utils/whatsapp.ts';
 import {
   WeeklyScheduleTimeline,
   getWeekStartSaturday,
@@ -46,12 +48,13 @@ import {
   ArrowUpDown,
   TrendingUp,
   Forward,
+  MessageCircle,
 } from 'lucide-react';
 
 export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: string) => void }> = ({
   onSelectTripForBooking,
 }) => {
-  const { isMasterAdmin, isModerator, canManageTrips } = useAuth();
+  const { user, isMasterAdmin, isModerator, canManageTrips } = useAuth();
 
   // Filter States
   const [dateMode, setDateMode] = useState<'single' | 'range'>('single');
@@ -93,6 +96,8 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
   const [showReportModal, setShowReportModal] = useState<boolean>(false);
   // Forward Yesterday's UP Trips Modal
   const [showForwardModal, setShowForwardModal] = useState<boolean>(false);
+  // Owner WhatsApp Modal
+  const [showWhatsAppModal, setShowWhatsAppModal] = useState<boolean>(false);
 
   // Load vehicles, routes, supervisors and drivers list
   const [supervisorsList, setSupervisorsList] = useState<{ id: string; name: string }[]>([]);
@@ -474,12 +479,316 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
     document.body.removeChild(link);
   };
 
+  const whatsappOwnerItems = useMemo<OwnerReportSummaryItem[]>(() => {
+    const vehicleById = new Map<string, Vehicle>();
+    const vehicleByReg = new Map<string, Vehicle>();
+    vehicles.forEach((v) => {
+      vehicleById.set(v.id, v);
+      const norm = normalizeRegNo(v.regNo);
+      if (norm) vehicleByReg.set(norm, v);
+    });
+
+    const map = new Map<string, OwnerReportSummaryItem & { _vehiclesSet: Set<string> }>();
+    filtered.forEach((s) => {
+      if (s.status === 'cancelled') return;
+      const v = vehicleById.get(s.vehicleId) || vehicleByReg.get(normalizeRegNo(s.vehicleRegNo));
+      const ownerName = (s.vehicleOwnerName || v?.ownerName || 'সাধারণ').trim();
+      const ownerPhone = v?.ownerPhone || '';
+      const fares = getScheduleFares(s);
+
+      if (!map.has(ownerName)) {
+        map.set(ownerName, {
+          ownerName,
+          ownerPhone,
+          vehicles: [],
+          tripCount: 0,
+          bookedSeats: 0,
+          seatFare: 0,
+          cargoFare: 0,
+          totalFare: 0,
+          customLines: [],
+          _vehiclesSet: new Set<string>(),
+        });
+      }
+
+      const entry = map.get(ownerName)!;
+      if (!entry.ownerPhone && ownerPhone) entry.ownerPhone = ownerPhone;
+      if (s.vehicleRegNo) entry._vehiclesSet.add(s.vehicleRegNo);
+      entry.tripCount += 1;
+      entry.bookedSeats = (entry.bookedSeats || 0) + (s.totalBookedSeats || 0);
+      entry.seatFare = (entry.seatFare || 0) + fares.seatCol;
+      entry.cargoFare = (entry.cargoFare || 0) + fares.cargoCol;
+      entry.totalFare += fares.totalCol;
+      entry.customLines?.push(
+        `${s.direction === 'UP' ? 'আপ' : 'ডাউন'} (${s.departureTime}) • ${s.vehicleRegNo} • ${s.routeName} • ${formatTaka(fares.totalCol)}`
+      );
+    });
+
+    return Array.from(map.values()).map(({ _vehiclesSet, ...rest }) => ({
+      ...rest,
+      vehicles: Array.from(_vehiclesSet),
+    }));
+  }, [filtered, vehicles]);
+
   const handlePrint = () => {
-    window.print();
+    printElementById(
+      'printable-trip-report',
+      `দৈনিক ট্রিপ রিপোর্ট — ${dateMode === 'single' ? date : `${startDate}_to_${endDate}`}`,
+      'A4-landscape'
+    );
+  };
+
+  const renderPrintableTripReport = () => {
+    const cellStyle: React.CSSProperties = {
+      borderRight: '1px solid #475569',
+      borderBottom: '1px solid #475569',
+      padding: '7px 5px',
+      lineHeight: 1.6,
+      verticalAlign: 'middle',
+      wordBreak: 'normal',
+      overflowWrap: 'break-word',
+    };
+    const thStyle: React.CSSProperties = {
+      ...cellStyle,
+      padding: '8px 5px',
+      lineHeight: 1.5,
+      fontWeight: 800,
+      backgroundColor: '#e2e8f0',
+      color: '#0f172a',
+    };
+    const tableStyle: React.CSSProperties = {
+      width: '100%',
+      borderCollapse: 'separate',
+      borderSpacing: 0,
+      borderTop: '1px solid #475569',
+      borderLeft: '1px solid #475569',
+      fontSize: '10px',
+      lineHeight: 1.6,
+      backgroundColor: '#ffffff',
+      color: '#0f172a',
+    };
+    const dateRangeTitle =
+      dateMode === 'single'
+        ? `তারিখ: ${date} (${formatBengaliDate(date)})`
+        : `তারিখ রেঞ্জ: ${formatBengaliDate(startDate)} হতে ${formatBengaliDate(endDate)}`;
+
+    const renderDirectionRouteTable = (
+      title: string,
+      titleColor: string,
+      groups: RouteTripGroup[],
+      prefix: string
+    ) =>
+      groups.length > 0 && (
+        <div style={{ marginTop: '12px' }}>
+          <div style={{ fontSize: '11.5px', fontWeight: 800, color: titleColor, marginBottom: '6px' }}>
+            {title}
+          </div>
+          {groups.map((rg) => (
+            <div key={`${prefix}-${rg.routeNumber}-${rg.routeName}`} style={{ marginBottom: '10px' }}>
+              <div
+                style={{
+                  fontSize: '10.5px',
+                  fontWeight: 800,
+                  color: '#0f172a',
+                  backgroundColor: '#f1f5f9',
+                  padding: '6px 8px',
+                  borderTop: '1px solid #475569',
+                  borderLeft: '1px solid #475569',
+                  borderRight: '1px solid #475569',
+                  lineHeight: 1.5,
+                }}
+              >
+                {toBengaliDigits(rg.routeNumber)} নং রুট : {rg.routeName} (মোট {toBengaliDigits(rg.trips.length)} টি ট্রিপ)
+              </div>
+              <table className="report-table recon-compact-table" style={{ ...tableStyle, tableLayout: 'fixed' }}>
+                <colgroup>
+                  <col style={{ width: '4.5%' }} />
+                  <col style={{ width: '10%' }} />
+                  <col style={{ width: '8.5%' }} />
+                  <col style={{ width: '10%' }} />
+                  <col style={{ width: '10%' }} />
+                  <col style={{ width: '11%' }} />
+                  <col style={{ width: '11%' }} />
+                  <col style={{ width: '7.5%' }} />
+                  <col style={{ width: '9%' }} />
+                  <col style={{ width: '9%' }} />
+                  <col style={{ width: '9.5%' }} />
+                </colgroup>
+                <thead>
+                  <tr>
+                    <th style={thStyle}>ক্র.</th>
+                    <th style={{ ...thStyle, textAlign: 'left' }}>ট্রিপ নং</th>
+                    <th style={thStyle}>ছাড়ার সময়</th>
+                    <th style={{ ...thStyle, textAlign: 'left' }}>গাড়ি নম্বর</th>
+                    <th style={{ ...thStyle, textAlign: 'left' }}>মালিক</th>
+                    <th style={{ ...thStyle, textAlign: 'left' }}>সুপারভাইজার</th>
+                    <th style={{ ...thStyle, textAlign: 'left' }}>ড্রাইভার</th>
+                    <th style={thStyle}>সিট</th>
+                    <th style={{ ...thStyle, textAlign: 'right' }}>সিট ভাড়া</th>
+                    <th style={{ ...thStyle, textAlign: 'right' }}>মালের ভাড়া</th>
+                    <th style={{ ...thStyle, textAlign: 'right' }}>মোট টাকা</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rg.trips.map((s, idx) => {
+                    const fares = getScheduleFares(s);
+                    return (
+                      <tr key={s.id} style={{ backgroundColor: idx % 2 === 1 ? '#f8fafc' : '#ffffff' }}>
+                        <td style={{ ...cellStyle, textAlign: 'center', fontWeight: 700 }}>
+                          {toBengaliDigits(s.serialInRoute)}
+                        </td>
+                        <td style={{ ...cellStyle, fontWeight: 800 }}>{s.tripNo}</td>
+                        <td style={{ ...cellStyle, textAlign: 'center', fontWeight: 700 }}>{s.departureTime}</td>
+                        <td style={{ ...cellStyle, fontWeight: 700 }}>{s.vehicleRegNo}</td>
+                        <td style={cellStyle}>{s.vehicleOwnerName || 'সাধারণ'}</td>
+                        <td style={cellStyle}>{s.supervisor || '-'}</td>
+                        <td style={cellStyle}>{s.driver || '-'}</td>
+                        <td style={{ ...cellStyle, textAlign: 'center', fontWeight: 700 }}>
+                          {toBengaliDigits(s.totalBookedSeats || 0)}/{toBengaliDigits(s.seatCapacity)}
+                        </td>
+                        <td style={{ ...cellStyle, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                          {formatTaka(fares.seatCol)}
+                        </td>
+                        <td style={{ ...cellStyle, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                          {formatTaka(fares.cargoCol)}
+                        </td>
+                        <td style={{ ...cellStyle, textAlign: 'right', fontWeight: 800, fontVariantNumeric: 'tabular-nums' }}>
+                          {formatTaka(fares.totalCol)}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+                <tfoot>
+                  <tr style={{ backgroundColor: '#e2e8f0', fontWeight: 800 }}>
+                    <td colSpan={8} style={{ ...cellStyle, padding: '8px 6px', textAlign: 'right', backgroundColor: '#e2e8f0' }}>
+                      রুট মোট ({toBengaliDigits(rg.trips.length)} টি ট্রিপ):
+                    </td>
+                    <td style={{ ...cellStyle, padding: '8px 5px', textAlign: 'right', fontVariantNumeric: 'tabular-nums', backgroundColor: '#e2e8f0' }}>
+                      {formatTaka(rg.trips.reduce((sum, s) => sum + getScheduleFares(s).seatCol, 0))}
+                    </td>
+                    <td style={{ ...cellStyle, padding: '8px 5px', textAlign: 'right', fontVariantNumeric: 'tabular-nums', backgroundColor: '#e2e8f0' }}>
+                      {formatTaka(rg.trips.reduce((sum, s) => sum + getScheduleFares(s).cargoCol, 0))}
+                    </td>
+                    <td style={{ ...cellStyle, padding: '8px 5px', textAlign: 'right', fontVariantNumeric: 'tabular-nums', backgroundColor: '#e2e8f0' }}>
+                      {formatTaka(rg.trips.reduce((sum, s) => sum + getScheduleFares(s).totalCol, 0))}
+                    </td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          ))}
+        </div>
+      );
+
+    return (
+      <div
+        id="printable-trip-report"
+        className="p-4 sm:p-5 bg-white text-slate-900 font-sans"
+        style={{ backgroundColor: '#ffffff', color: '#0f172a' }}
+      >
+        <div
+          className="recon-print-header"
+          style={{
+            textAlign: 'center',
+            borderBottom: '1.5px solid #0f172a',
+            paddingBottom: '8px',
+            marginBottom: '10px',
+          }}
+        >
+          <h1
+            className="recon-company-name"
+            style={{
+              fontSize: '19px',
+              fontWeight: 800,
+              color: '#0f172a',
+              lineHeight: 1.35,
+              margin: 0,
+            }}
+          >
+            {user?.company?.name || 'কাউন্টার টিকেটিং'}
+          </h1>
+          <div
+            className="recon-subtitle"
+            style={{
+              fontSize: '11px',
+              fontWeight: 600,
+              color: '#334155',
+              marginTop: '3px',
+              lineHeight: 1.4,
+            }}
+          >
+            দৈনিক ট্রিপ ও ফিরতি লগ ডাটা টেবিল • {dateRangeTitle} • মোট ট্রিপ: {toBengaliDigits(filtered.length)} টি • মোট আদায়: {formatTaka(totalRevenue)}
+          </div>
+        </div>
+
+        {/* Table 1: Vehicle-wise Trip Counts */}
+        {vehicleStatsList.length > 0 && (
+          <div style={{ marginBottom: '10px' }}>
+            <div style={{ fontSize: '11px', fontWeight: 800, color: '#0f172a', marginBottom: '5px' }}>
+              ১. গাড়ি ও মালিকভিত্তিক ট্রিপ সংখ্যা সারসংক্ষেপ:
+            </div>
+            <table className="report-table recon-compact-table" style={{ ...tableStyle, tableLayout: 'fixed' }}>
+              <colgroup>
+                <col style={{ width: '6%' }} />
+                <col style={{ width: '18%' }} />
+                <col style={{ width: '24%' }} />
+                <col style={{ width: '13%' }} />
+                <col style={{ width: '13%' }} />
+                <col style={{ width: '13%' }} />
+                <col style={{ width: '13%' }} />
+              </colgroup>
+              <thead>
+                <tr>
+                  <th style={thStyle}>ক্র.</th>
+                  <th style={{ ...thStyle, textAlign: 'left' }}>গাড়ি নম্বর</th>
+                  <th style={{ ...thStyle, textAlign: 'left' }}>গাড়ির মালিক</th>
+                  <th style={thStyle}>আপ ট্রিপ</th>
+                  <th style={thStyle}>ডাউন ট্রিপ</th>
+                  <th style={thStyle}>মোট ট্রিপ</th>
+                  <th style={thStyle}>বুকড সিট</th>
+                </tr>
+              </thead>
+              <tbody>
+                {vehicleStatsList.map((vs, idx) => (
+                  <tr key={vs.regNo} style={{ backgroundColor: idx % 2 === 1 ? '#f8fafc' : '#ffffff' }}>
+                    <td style={{ ...cellStyle, textAlign: 'center', fontWeight: 700 }}>{toBengaliDigits(idx + 1)}</td>
+                    <td style={{ ...cellStyle, fontWeight: 800 }}>{vs.regNo}</td>
+                    <td style={cellStyle}>{vs.ownerName || 'সাধারণ'}</td>
+                    <td style={{ ...cellStyle, textAlign: 'center', fontWeight: 700, color: '#1e40af' }}>
+                      {toBengaliDigits(vs.upTrips)}
+                    </td>
+                    <td style={{ ...cellStyle, textAlign: 'center', fontWeight: 700, color: '#065f46' }}>
+                      {toBengaliDigits(vs.downTrips)}
+                    </td>
+                    <td style={{ ...cellStyle, textAlign: 'center', fontWeight: 800 }}>
+                      {toBengaliDigits(vs.totalTrips)}
+                    </td>
+                    <td style={{ ...cellStyle, textAlign: 'center', fontWeight: 700 }}>
+                      {toBengaliDigits(vs.bookedSeats)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {renderDirectionRouteTable('২.১ আপ ট্রিপ রুটভিত্তিক তালিকা (সময় অনুযায়ী):', '#1e3a8a', upRouteGroups, 'print-up')}
+        {renderDirectionRouteTable('২.২ ডাউন / ফিরতি ট্রিপ রুটভিত্তিক তালিকা (সময় অনুযায়ী):', '#065f46', downRouteGroups, 'print-dn')}
+
+        {filtered.length === 0 && (
+          <div style={{ padding: '18px', textAlign: 'center', color: '#64748b', border: '1px solid #475569', fontWeight: 600 }}>
+            নির্বাচিত তারিখে কোনো ট্রিপ পাওয়া যায়নি।
+          </div>
+        )}
+      </div>
+    );
   };
 
   return (
     <div className="space-y-6">
+      <div className="space-y-6 print:hidden">
       {/* Top Header Card */}
       <div className="bg-white p-5 rounded-3xl border border-slate-200 shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
@@ -524,11 +833,11 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
           <button
             type="button"
             onClick={() => downloadDailyTripsPDF(schedules, dateMode === 'single' ? date : `${startDate}_to_${endDate}`)}
-            className="px-3.5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer shadow-xs"
-            title="দৈনিক ট্রিপ শিডিউল পিডিএফ ডাউনলোড"
+            className="px-3.5 py-2 bg-slate-800 hover:bg-slate-900 text-white rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer shadow-xs"
+            title="শুধু ডাটা টেবিল পিডিএফ ডাউনলোড"
           >
-            <Download className="w-4 h-4 text-blue-200" />
-            <span>পিডিএফ (PDF)</span>
+            <Download className="w-4 h-4 text-emerald-400" />
+            <span>টেবিল PDF</span>
           </button>
 
           <button
@@ -542,8 +851,28 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
 
           <button
             type="button"
+            onClick={() => setShowWhatsAppModal(true)}
+            className="px-3.5 py-2 bg-emerald-700 hover:bg-emerald-800 text-white rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer shadow-xs"
+            title="মালিকদের মোবাইলে হোয়াটসঅ্যাপে হিসাব পাঠান"
+          >
+            <MessageCircle className="w-4 h-4" />
+            <span>হোয়াটসঅ্যাপ (মালিক)</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handlePrint}
+            className="px-3.5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold shadow-xs transition-all flex items-center gap-1.5 cursor-pointer"
+            title="শুধু টেবিল প্রিন্ট"
+          >
+            <Printer className="w-4 h-4" />
+            <span>শুধু টেবিল প্রিন্ট</span>
+          </button>
+
+          <button
+            type="button"
             onClick={() => setShowReportModal(true)}
-            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold shadow-md transition-all flex items-center gap-1.5 cursor-pointer"
+            className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold shadow-md transition-all flex items-center gap-1.5 cursor-pointer"
           >
             <Printer className="w-4 h-4" />
             <span>প্রিন্ট ভিউ</span>
@@ -1786,24 +2115,33 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
           </div>
         </div>
       )}
+      </div>
 
-      {/* PDF & Printable Report Modal */}
-      {showReportModal && (
+      {/* PDF & Printable Table-Only Report Modal */}
+      {showReportModal ? (
         <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl max-w-4xl w-full p-6 max-h-[90vh] overflow-y-auto shadow-2xl space-y-4">
-            <div className="flex items-center justify-between pb-3 border-b">
+          <div className="bg-white rounded-3xl max-w-6xl w-full p-5 max-h-[92vh] overflow-y-auto shadow-2xl space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b print:hidden">
               <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
                 <Printer className="w-5 h-5 text-indigo-600" />
-                <span>ট্রিপ শিডিউল ও গাড়ির ট্রিপ সারাংশ রিপোর্ট</span>
+                <span>দৈনিক ট্রিপ ও ফিরতি লগ — শুধু টেবিল প্রিভিউ</span>
               </h3>
               <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => downloadDailyTripsPDF(schedules, dateMode === 'single' ? date : `${startDate}_to_${endDate}`)}
+                  className="px-3.5 py-2 bg-slate-800 hover:bg-slate-900 text-white rounded-xl text-xs font-bold shadow-xs cursor-pointer flex items-center gap-1.5"
+                >
+                  <Download className="w-4 h-4 text-emerald-400" />
+                  <span>টেবিল PDF</span>
+                </button>
                 <button
                   type="button"
                   onClick={handlePrint}
                   className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold shadow-md cursor-pointer flex items-center gap-1.5"
                 >
                   <Printer className="w-4 h-4" />
-                  <span>প্রিন্ট / সেভ অ্যাজ পিডিএফ</span>
+                  <span>শুধু টেবিল প্রিন্ট</span>
                 </button>
                 <button
                   type="button"
@@ -1815,252 +2153,12 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
               </div>
             </div>
 
-            {/* Printable Area */}
-            <div id="printable-trip-report" className="p-6 border border-slate-300 rounded-2xl bg-white text-slate-900 font-sans space-y-5">
-              {/* Header */}
-              <div className="text-center border-b pb-4 space-y-1">
-                <h2 className="text-2xl font-black text-slate-900">কাউন্টার বুকিং ও বাস পরিবহন</h2>
-                <p className="text-sm font-semibold text-slate-600">
-                  দৈনিক ও রেঞ্জভিত্তিক ট্রিপ অপারেশন এবং গাড়ি পারফর্মেন্স রিপোর্ট
-                </p>
-                <div className="inline-block px-4 py-1 bg-slate-100 rounded-full text-xs font-bold text-slate-800">
-                  {dateMode === 'single'
-                    ? `তারিখ: ${formatBengaliDate(date)}`
-                    : `তারিখ রেঞ্জ: ${formatBengaliDate(startDate)} হতে ${formatBengaliDate(endDate)}`}
-                </div>
-              </div>
-
-              {/* KPI Summary Block */}
-              <div className="grid grid-cols-4 gap-3 text-center border p-3 rounded-xl bg-slate-50 text-xs">
-                <div>
-                  <span className="text-slate-500 block">আপ ট্রিপ সংখ্যা:</span>
-                  <strong className="text-blue-800 font-bold text-sm">
-                    {toBengaliDigits(upTrips.length)} টি ({toBengaliDigits(uniqueUpVehicles)} টি গাড়ি)
-                  </strong>
-                </div>
-                <div>
-                  <span className="text-slate-500 block">ডাউন ট্রিপ সংখ্যা:</span>
-                  <strong className="text-emerald-800 font-bold text-sm">
-                    {toBengaliDigits(downTrips.length)} টি ({toBengaliDigits(uniqueDownVehicles)} টি গাড়ি)
-                  </strong>
-                </div>
-                <div>
-                  <span className="text-slate-500 block">মোট ট্রিপ ও গাড়ি:</span>
-                  <strong className="text-purple-800 font-bold text-sm">
-                    {toBengaliDigits(filtered.length)} ট্রিপ ({toBengaliDigits(totalUniqueVehicles)} টি গাড়ি)
-                  </strong>
-                </div>
-                <div>
-                  <span className="text-slate-500 block">মোট আদায় (সিট + মাল):</span>
-                  <strong className="text-slate-900 font-bold text-sm">{formatTaka(totalRevenue)}</strong>
-                  <div className="text-[10px] text-slate-600">
-                    সিট: {formatTaka(totalSeatRevenue)} | মাল: {formatTaka(totalCargoRevenue)}
-                  </div>
-                </div>
-              </div>
-
-              {/* Table 1: Vehicle-wise Trip Counts (কয়টা গাড়ী কয় ট্রিপ করেছে) */}
-              <div>
-                <h4 className="text-xs font-bold text-slate-800 mb-2 uppercase tracking-wide">
-                  ১. গাড়ি ও মালিকভিত্তিক ট্রিপ সংখ্যা সারসংক্ষেপ:
-                </h4>
-                <table className="w-full text-xs border-collapse border border-slate-300">
-                  <thead>
-                    <tr className="bg-slate-100 font-bold border-b border-slate-300">
-                      <th className="border border-slate-300 p-2 text-center w-10">ক্র.</th>
-                      <th className="border border-slate-300 p-2 text-left">গাড়ি নম্বর</th>
-                      <th className="border border-slate-300 p-2 text-left">গাড়ির মালিক</th>
-                      <th className="border border-slate-300 p-2 text-center">আপ ট্রিপ</th>
-                      <th className="border border-slate-300 p-2 text-center">ডাউন ট্রিপ</th>
-                      <th className="border border-slate-300 p-2 text-center">মোট ট্রিপ সংখ্যা</th>
-                      <th className="border border-slate-300 p-2 text-center">বুকড সিট</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {vehicleStatsList.map((vs, idx) => (
-                      <tr key={vs.regNo} className="border-b border-slate-200">
-                        <td className="border border-slate-300 p-2 text-center">{toBengaliDigits(idx + 1)}</td>
-                        <td className="border border-slate-300 p-2 font-bold font-mono">{vs.regNo}</td>
-                        <td className="border border-slate-300 p-2">{vs.ownerName || 'সাধারণ'}</td>
-                        <td className="border border-slate-300 p-2 text-center text-blue-700 font-bold">
-                          {toBengaliDigits(vs.upTrips)}
-                        </td>
-                        <td className="border border-slate-300 p-2 text-center text-emerald-700 font-bold">
-                          {toBengaliDigits(vs.downTrips)}
-                        </td>
-                        <td className="border border-slate-300 p-2 text-center font-black">
-                          {toBengaliDigits(vs.totalTrips)}
-                        </td>
-                        <td className="border border-slate-300 p-2 text-center">{toBengaliDigits(vs.bookedSeats)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-
-              {/* Table 2.1: UP Trips List Route-Grouped */}
-              {upRouteGroups.length > 0 && (
-                <div>
-                  <h4 className="text-xs font-bold text-blue-900 mb-2 uppercase tracking-wide">
-                    ২.১ আপ ট্রিপ রুটভিত্তিক তালিকা (সময় অনুযায়ী ক্রমানুসারে):
-                  </h4>
-                  {upRouteGroups.map((rg) => (
-                    <div key={`print-up-${rg.routeNumber}`} className="mb-4">
-                      <div className="text-[11px] font-bold text-slate-800 bg-slate-100 p-1.5 border border-slate-300 border-b-0">
-                        {toBengaliDigits(rg.routeNumber)} নং রুট : {rg.routeName} (মোট {toBengaliDigits(rg.trips.length)} টি ট্রিপ)
-                      </div>
-                      <table className="w-full text-xs border-collapse border border-slate-300 mb-2">
-                        <thead>
-                          <tr className="bg-slate-50 font-bold border-b border-slate-300">
-                            <th className="border border-slate-300 p-1.5 text-center w-12">ক্রমিক</th>
-                            <th className="border border-slate-300 p-1.5 text-left">ট্রিপ নং</th>
-                            <th className="border border-slate-300 p-1.5 text-left">ছাড়ার সময়</th>
-                            <th className="border border-slate-300 p-1.5 text-left">গাড়ি নম্বর</th>
-                            <th className="border border-slate-300 p-1.5 text-left">মালিক</th>
-                            <th className="border border-slate-300 p-1.5 text-left">সুপারভাইজার</th>
-                            <th className="border border-slate-300 p-1.5 text-left">ড্রাইভার</th>
-                            <th className="border border-slate-300 p-1.5 text-center">বুকড সিট</th>
-                            <th className="border border-slate-300 p-1.5 text-right">সিট ভাড়া</th>
-                            <th className="border border-slate-300 p-1.5 text-right">মালের ভাড়া</th>
-                            <th className="border border-slate-300 p-1.5 text-right font-black">মোট টাকা</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {rg.trips.map((s) => {
-                            const fares = getScheduleFares(s);
-                            return (
-                              <tr key={s.id} className="border-b border-slate-200">
-                                <td className="border border-slate-300 p-1.5 text-center font-bold">
-                                  {toBengaliDigits(s.serialInRoute)}
-                                </td>
-                                <td className="border border-slate-300 p-1.5 font-bold">{s.tripNo}</td>
-                                <td className="border border-slate-300 p-1.5 font-bold">{s.departureTime}</td>
-                                <td className="border border-slate-300 p-1.5">{s.vehicleRegNo}</td>
-                                <td className="border border-slate-300 p-1.5">{s.vehicleOwnerName || 'সাধারণ'}</td>
-                                <td className="border border-slate-300 p-1.5">{s.supervisor}</td>
-                                <td className="border border-slate-300 p-1.5">{s.driver}</td>
-                                <td className="border border-slate-300 p-1.5 text-center font-bold">
-                                  {toBengaliDigits(s.totalBookedSeats || 0)}/{toBengaliDigits(s.seatCapacity)}
-                                </td>
-                                <td className="border border-slate-300 p-1.5 text-right font-semibold tabular-nums">
-                                  {formatTaka(fares.seatCol)}
-                                </td>
-                                <td className="border border-slate-300 p-1.5 text-right font-semibold tabular-nums">
-                                  {formatTaka(fares.cargoCol)}
-                                </td>
-                                <td className="border border-slate-300 p-1.5 text-right font-bold tabular-nums">
-                                  {formatTaka(fares.totalCol)}
-                                </td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                        <tfoot>
-                          <tr className="bg-slate-100 font-bold">
-                            <td colSpan={8} className="border border-slate-300 p-1.5 text-right">রুট মোট:</td>
-                            <td className="border border-slate-300 p-1.5 text-right tabular-nums">
-                              {formatTaka(rg.trips.reduce((sum, s) => sum + getScheduleFares(s).seatCol, 0))}
-                            </td>
-                            <td className="border border-slate-300 p-1.5 text-right tabular-nums">
-                              {formatTaka(rg.trips.reduce((sum, s) => sum + getScheduleFares(s).cargoCol, 0))}
-                            </td>
-                            <td className="border border-slate-300 p-1.5 text-right font-black tabular-nums">
-                              {formatTaka(rg.trips.reduce((sum, s) => sum + getScheduleFares(s).totalCol, 0))}
-                            </td>
-                          </tr>
-                        </tfoot>
-                      </table>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {/* Table 2.2: DOWN Trips List Route-Grouped */}
-              {downRouteGroups.length > 0 && (
-                <div>
-                  <h4 className="text-xs font-bold text-emerald-900 mb-2 uppercase tracking-wide">
-                    ২.২ ডাউন ট্রিপ রুটভিত্তিক তালিকা (সময় অনুযায়ী ক্রমানুসারে):
-                  </h4>
-                  {downRouteGroups.map((rg) => (
-                    <div key={`print-dn-${rg.routeNumber}`} className="mb-4">
-                      <div className="text-[11px] font-bold text-slate-800 bg-slate-100 p-1.5 border border-slate-300 border-b-0">
-                        {toBengaliDigits(rg.routeNumber)} নং রুট : {rg.routeName} (মোট {toBengaliDigits(rg.trips.length)} টি ট্রিপ)
-                      </div>
-                      <table className="w-full text-xs border-collapse border border-slate-300 mb-2">
-                        <thead>
-                          <tr className="bg-slate-50 font-bold border-b border-slate-300">
-                            <th className="border border-slate-300 p-1.5 text-center w-12">ক্রমিক</th>
-                            <th className="border border-slate-300 p-1.5 text-left">ট্রিপ নং</th>
-                            <th className="border border-slate-300 p-1.5 text-left">ছাড়ার সময়</th>
-                            <th className="border border-slate-300 p-1.5 text-left">গাড়ি নম্বর</th>
-                            <th className="border border-slate-300 p-1.5 text-left">মালিক</th>
-                            <th className="border border-slate-300 p-1.5 text-left">সুপারভাইজার</th>
-                            <th className="border border-slate-300 p-1.5 text-left">ড্রাইভার</th>
-                            <th className="border border-slate-300 p-1.5 text-center">বুকড সিট</th>
-                            <th className="border border-slate-300 p-1.5 text-right">সিট ভাড়া</th>
-                            <th className="border border-slate-300 p-1.5 text-right">মালের ভাড়া</th>
-                            <th className="border border-slate-300 p-1.5 text-right font-black">মোট টাকা</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {rg.trips.map((s) => {
-                            const fares = getScheduleFares(s);
-                            return (
-                              <tr key={s.id} className="border-b border-slate-200">
-                                <td className="border border-slate-300 p-1.5 text-center font-bold">
-                                  {toBengaliDigits(s.serialInRoute)}
-                                </td>
-                                <td className="border border-slate-300 p-1.5 font-bold">{s.tripNo}</td>
-                                <td className="border border-slate-300 p-1.5 font-bold">{s.departureTime}</td>
-                                <td className="border border-slate-300 p-1.5">{s.vehicleRegNo}</td>
-                                <td className="border border-slate-300 p-1.5">{s.vehicleOwnerName || 'সাধারণ'}</td>
-                                <td className="border border-slate-300 p-1.5">{s.supervisor}</td>
-                                <td className="border border-slate-300 p-1.5">{s.driver}</td>
-                                <td className="border border-slate-300 p-1.5 text-center font-bold">
-                                  {toBengaliDigits(s.totalBookedSeats || 0)}/{toBengaliDigits(s.seatCapacity)}
-                                </td>
-                                <td className="border border-slate-300 p-1.5 text-right font-semibold tabular-nums">
-                                  {formatTaka(fares.seatCol)}
-                                </td>
-                                <td className="border border-slate-300 p-1.5 text-right font-semibold tabular-nums">
-                                  {formatTaka(fares.cargoCol)}
-                                </td>
-                                <td className="border border-slate-300 p-1.5 text-right font-bold tabular-nums">
-                                  {formatTaka(fares.totalCol)}
-                                </td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                        <tfoot>
-                          <tr className="bg-slate-100 font-bold">
-                            <td colSpan={8} className="border border-slate-300 p-1.5 text-right">রুট মোট:</td>
-                            <td className="border border-slate-300 p-1.5 text-right tabular-nums">
-                              {formatTaka(rg.trips.reduce((sum, s) => sum + getScheduleFares(s).seatCol, 0))}
-                            </td>
-                            <td className="border border-slate-300 p-1.5 text-right tabular-nums">
-                              {formatTaka(rg.trips.reduce((sum, s) => sum + getScheduleFares(s).cargoCol, 0))}
-                            </td>
-                            <td className="border border-slate-300 p-1.5 text-right font-black tabular-nums">
-                              {formatTaka(rg.trips.reduce((sum, s) => sum + getScheduleFares(s).totalCol, 0))}
-                            </td>
-                          </tr>
-                        </tfoot>
-                      </table>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {/* Single Certification / Approval */}
-              <div className="pt-12 flex justify-between items-center text-xs font-semibold text-slate-800">
-                <div>তারিখ: {formatBengaliDate(getTodayDhakaDate())}</div>
-                <div className="border-t border-slate-600 pt-1 w-64 text-center">
-                  প্রত্যায়নকারী : ____________________
-                </div>
-              </div>
-            </div>
+            {renderPrintableTripReport()}
           </div>
+        </div>
+      ) : (
+        <div className="hidden print:block">
+          {renderPrintableTripReport()}
         </div>
       )}
 
@@ -2078,6 +2176,20 @@ export const DailySchedulesPage: React.FC<{ onSelectTripForBooking?: (tripId: st
           );
           await fetchSchedules();
         }}
+      />
+
+      {/* Owner WhatsApp Reporting Modal */}
+      <OwnerWhatsAppModal
+        isOpen={showWhatsAppModal}
+        onClose={() => setShowWhatsAppModal(false)}
+        companyName={user?.company?.name || 'কাউন্টার টিকেটিং'}
+        reportTitle="দৈনিক ট্রিপ ও ফিরতি লগ"
+        dateLabel={
+          dateMode === 'single'
+            ? `${date} (${formatBengaliDate(date)})`
+            : `${startDate} হতে ${endDate}`
+        }
+        items={whatsappOwnerItems}
       />
     </div>
   );

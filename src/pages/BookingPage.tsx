@@ -23,7 +23,8 @@ import {
 } from 'lucide-react';
 
 export const BookingPage: React.FC = () => {
-  const { user, isMasterAdmin, isModerator } = useAuth();
+  const { user, isMasterAdmin, isModerator, isChecker, isFuelManager } = useAuth();
+  const isReadOnlyViewer = isChecker || isFuelManager;
 
   const [date, setDate] = useState<string>(getTodayDhakaDate());
   const [direction, setDirection] = useState<'UP' | 'DOWN'>('UP');
@@ -795,35 +796,41 @@ export const BookingPage: React.FC = () => {
                   )}
                 </div>
 
-                <button
-                  type="submit"
-                  disabled={
-                    bookingInProgress ||
-                    (selectedSeats.length === 0 && parsedCargoFare <= 0) ||
-                    (selectedSeats.length > 0 &&
-                      (manualFare.trim() === '' ||
-                        isNaN(Number(manualFare)) ||
-                        Number(manualFare) < 0))
-                  }
-                  className="w-full py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-sm shadow-md hover:shadow-lg transition-all flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
-                >
-                  {bookingInProgress ? (
-                    'ডাটাবেজে সুরক্ষিত বুকিং নিশ্চিত করা হচ্ছে...'
-                  ) : selectedSeats.length === 0 && parsedCargoFare <= 0 ? (
-                    <span>সিট নির্বাচন করুন অথবা মালের ভাড়া লিখুন</span>
-                  ) : selectedSeats.length > 0 && manualFare.trim() === '' ? (
-                    <span>সিট ভাড়ার পরিমাণ ম্যানুয়ালী যুক্ত করুন ({toBengaliDigits(selectedSeats.length)} আসন)</span>
-                  ) : (
-                    <>
-                      <Check className="w-4 h-4" />
-                      <span>
-                        {selectedSeats.length > 0
-                          ? `বুকিং কনফার্ম ও টিকিট প্রিন্ট করুন (${toBengaliDigits(selectedSeats.length)} আসন — ${formatTaka(currentTotalFare)})`
-                          : `মালামাল বুকিং কনফার্ম ও রসিদ প্রিন্ট করুন (${formatTaka(currentTotalFare)})`}
-                      </span>
-                    </>
-                  )}
-                </button>
+                {isReadOnlyViewer ? (
+                  <div className="p-3 bg-indigo-50 border border-indigo-200 rounded-xl text-xs font-bold text-indigo-800 text-center">
+                    চেকার পরিদর্শন মোড — আপনি লাইভ সিট প্ল্যান ও বুকিং তালিকা দেখতে পারবেন (বুকিং/বাতিল অনুমোদিত নয়)
+                  </div>
+                ) : (
+                  <button
+                    type="submit"
+                    disabled={
+                      bookingInProgress ||
+                      (selectedSeats.length === 0 && parsedCargoFare <= 0) ||
+                      (selectedSeats.length > 0 &&
+                        (manualFare.trim() === '' ||
+                          isNaN(Number(manualFare)) ||
+                          Number(manualFare) < 0))
+                    }
+                    className="w-full py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-sm shadow-md hover:shadow-lg transition-all flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
+                  >
+                    {bookingInProgress ? (
+                      'ডাটাবেজে সুরক্ষিত বুকিং নিশ্চিত করা হচ্ছে...'
+                    ) : selectedSeats.length === 0 && parsedCargoFare <= 0 ? (
+                      <span>সিট নির্বাচন করুন অথবা মালের ভাড়া লিখুন</span>
+                    ) : selectedSeats.length > 0 && manualFare.trim() === '' ? (
+                      <span>সিট ভাড়ার পরিমাণ ম্যানুয়ালী যুক্ত করুন ({toBengaliDigits(selectedSeats.length)} আসন)</span>
+                    ) : (
+                      <>
+                        <Check className="w-4 h-4" />
+                        <span>
+                          {selectedSeats.length > 0
+                            ? `বুকিং কনফার্ম ও টিকিট প্রিন্ট করুন (${toBengaliDigits(selectedSeats.length)} আসন — ${formatTaka(currentTotalFare)})`
+                            : `মালামাল বুকিং কনফার্ম ও রসিদ প্রিন্ট করুন (${formatTaka(currentTotalFare)})`}
+                        </span>
+                      </>
+                    )}
+                  </button>
+                )}
               </form>
             </div>
           </div>
@@ -933,7 +940,7 @@ export const BookingPage: React.FC = () => {
                                 >
                                   <Printer className="w-3.5 h-3.5" />
                                 </button>
-                                {(isMasterAdmin || isModerator || b.counterId === user?.counterId) && (
+                                {!isReadOnlyViewer && (isMasterAdmin || isModerator || b.counterId === user?.counterId) && (
                                   <button
                                     type="button"
                                     onClick={async () => {

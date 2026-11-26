@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext.tsx';
 import { api } from '../services/api.ts';
 import type { Schedule, Booking, Supervisor } from '../types/index.ts';
-import { downloadWaybillPDF } from '../utils/pdfGenerator.ts';
+import { downloadWaybillPDF, printElementById } from '../utils/pdfGenerator.ts';
 import {
   formatTaka,
   toBengaliDigits,
@@ -142,11 +142,16 @@ export const SupervisorPanelPage: React.FC = () => {
   const selectedSchedule = schedules.find((s) => s.id === selectedScheduleId);
 
   const handlePrint = () => {
-    window.print();
+    printElementById(
+      'printable-supervisor-waybill',
+      selectedSchedule ? `Waybill-${selectedSchedule.tripNo}-${selectedSchedule.date}` : 'ওয়েবিল চালান',
+      'A4'
+    );
   };
 
   return (
     <div className="space-y-6">
+      <div className="space-y-6 print:hidden">
       {/* Top Banner / Header */}
       <div className="bg-gradient-to-r from-slate-900 via-slate-800 to-indigo-950 text-white p-6 rounded-3xl shadow-lg border border-slate-700/50 flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
@@ -653,6 +658,7 @@ export const SupervisorPanelPage: React.FC = () => {
             </>
           )}
         </div>
+      </div>
       </div>
 
       {/* Printable Passenger Manifest / Waybill Modal */}

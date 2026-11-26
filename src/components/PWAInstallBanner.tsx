@@ -103,9 +103,11 @@ export const PWAInstallBanner: React.FC = () => {
       {/* Top Notification Banner */}
       <div className="bg-gradient-to-r from-emerald-800 via-teal-900 to-slate-900 text-white px-3 sm:px-5 py-2.5 shadow-md flex items-center justify-between gap-3 text-xs sm:text-sm border-b border-emerald-500/20">
         <div className="flex items-center gap-2.5 min-w-0">
-          <div className="w-8 h-8 rounded-xl bg-emerald-500/20 border border-emerald-400/30 flex items-center justify-center shrink-0 shadow-inner">
-            <Smartphone className="w-4 h-4 text-emerald-300" />
-          </div>
+          <img
+            src="/logo.png"
+            alt="Data Code"
+            className="w-8 h-8 rounded-xl object-cover border border-emerald-400/40 shrink-0 shadow-inner"
+          />
           <div className="truncate">
             <span className="font-bold text-white tracking-wide">
               অ্যাপ হিসেবে ইনস্টল করুন (PWA):
@@ -166,9 +168,11 @@ export const PWAInstallBanner: React.FC = () => {
             {/* Modal Header */}
             <div className="bg-gradient-to-r from-slate-900 via-emerald-950 to-slate-900 text-white p-5 flex items-center justify-between">
               <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-2xl bg-emerald-500/20 border border-emerald-400/40 flex items-center justify-center text-emerald-300">
-                  <Smartphone className="w-5 h-5" />
-                </div>
+                <img
+                  src="/logo.png"
+                  alt="Data Code"
+                  className="w-10 h-10 rounded-2xl object-cover border border-emerald-400/40 shrink-0"
+                />
                 <div>
                   <h3 className="font-bold text-base text-white">অ্যাপ ইনস্টল সহায়িকা (PWA)</h3>
                   <p className="text-xs text-emerald-300">মোবাইল ও পিসিতে ইনস্টল করার সহজ নিয়ম</p>

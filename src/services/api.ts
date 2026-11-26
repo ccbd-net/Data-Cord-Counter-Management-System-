@@ -120,7 +120,7 @@ export const api = {
       if (!res.ok) return false;
       const status = await res.json();
       lastSyncTime = Date.now();
-      if (status.isEmptyFreshState || status.companiesCount === 0) {
+      if (status.isEmptyFreshState) {
         return await performVaultRehydration();
       }
       return false;
@@ -143,9 +143,13 @@ export const api = {
           (data.vault.companies?.length || 0) > 0 ||
           (data.vault.vehicles?.length || 0) > 0 ||
           (data.vault.schedules?.length || 0) > 0;
+        const hasTombstones = (data.vault.deletedCompanyIds?.length || 0) > 0;
 
-        if (serverHasData || options?.force) {
+        if (serverHasData || options?.force || hasTombstones) {
           await browserDb.saveFullVault(data.vault);
+          const validIds = (data.vault.companies || []).map((c: any) => c.id);
+          const deletedIds = data.vault.deletedCompanyIds || [];
+          await browserDb.purgeOrphanedRecords(validIds, deletedIds);
         }
       }
     } catch {}
@@ -161,9 +165,38 @@ export const api = {
     });
     const result = await handleResponse<{ success: boolean; token: string; user: User }>(res);
     if (result.success) {
+      if (result.user?.companyId && result.user?.role !== 'super_admin') {
+        await browserDb.purgeOrphanedRecords([result.user.companyId], []).catch(() => {});
+      }
       setTimeout(() => {
-        api.syncVaultSnapshot().catch(() => {});
+        api.syncVaultSnapshot({ force: true }).catch(() => {});
       }, 100);
+    }
+    return result;
+  },
+
+  async resetAdmin(): Promise<{ success: boolean; message: string }> {
+    const res = await fetch(`${API_BASE}/auth/reset-admin`, {
+      method: 'POST',
+    });
+    return handleResponse(res);
+  },
+
+  async updateOwnCredentials(params: {
+    currentPin: string;
+    newLoginId?: string;
+    newPin?: string;
+  }): Promise<{ success: boolean; token: string; user: User; message: string }> {
+    const res = await fetchWithAutoRehydrate(`${API_BASE}/auth/credentials`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
+      body: JSON.stringify(params),
+    });
+    const result = await handleResponse<{ success: boolean; token: string; user: User; message: string }>(res);
+    if (result.success && result.token) {
+      localStorage.setItem('zb_auth_token', result.token);
+      api.syncVaultSnapshot({ force: true }).catch(() => {});
+      browserDb.broadcastSync({ type: 'FORCE_REFRESH', companyId: result.user?.companyId });
     }
     return result;
   },
@@ -404,17 +437,38 @@ export const api = {
     }
   },
 
-  async createSupervisor(data: { name: string; phone?: string; companyId?: string }): Promise<{ success: boolean; supervisor: Supervisor }> {
+  async createSupervisor(data: { name: string; companyId?: string }): Promise<{
+    success: boolean;
+    supervisor: Supervisor;
+    supervisors?: Supervisor[];
+    createdCount?: number;
+    skippedCount?: number;
+  }> {
     const res = await fetchWithAutoRehydrate(`${API_BASE}/supervisors`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
       body: JSON.stringify(data),
     });
-    const result = await handleResponse<{ success: boolean; supervisor: Supervisor }>(res);
-    if (result.success && result.supervisor) {
-      const activeCompanyId = result.supervisor.companyId || localStorage.getItem('zb_active_company_id');
+    const result = await handleResponse<{
+      success: boolean;
+      supervisor: Supervisor;
+      supervisors?: Supervisor[];
+      createdCount?: number;
+      skippedCount?: number;
+    }>(res);
+    const createdList = result.supervisors?.length
+      ? result.supervisors
+      : result.supervisor
+      ? [result.supervisor]
+      : [];
+    if (result.success && createdList.length > 0) {
+      const activeCompanyId = createdList[0].companyId || localStorage.getItem('zb_active_company_id');
       const current = await browserDb.getSupervisors(activeCompanyId);
-      await browserDb.saveSupervisors([...current.filter((s) => s.id !== result.supervisor.id), result.supervisor], activeCompanyId);
+      const createdIds = new Set(createdList.map((s) => s.id));
+      await browserDb.saveSupervisors(
+        [...current.filter((s) => !createdIds.has(s.id)), ...createdList],
+        activeCompanyId
+      );
       await api.syncVaultSnapshot({ force: true });
     }
     return result;
@@ -468,17 +522,38 @@ export const api = {
     }
   },
 
-  async createDriver(data: { name: string; phone?: string; companyId?: string }): Promise<{ success: boolean; driver: Driver }> {
+  async createDriver(data: { name: string; companyId?: string }): Promise<{
+    success: boolean;
+    driver: Driver;
+    drivers?: Driver[];
+    createdCount?: number;
+    skippedCount?: number;
+  }> {
     const res = await fetchWithAutoRehydrate(`${API_BASE}/drivers`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
       body: JSON.stringify(data),
     });
-    const result = await handleResponse<{ success: boolean; driver: Driver }>(res);
-    if (result.success && result.driver) {
-      const activeCompanyId = result.driver.companyId || localStorage.getItem('zb_active_company_id');
+    const result = await handleResponse<{
+      success: boolean;
+      driver: Driver;
+      drivers?: Driver[];
+      createdCount?: number;
+      skippedCount?: number;
+    }>(res);
+    const createdList = result.drivers?.length
+      ? result.drivers
+      : result.driver
+      ? [result.driver]
+      : [];
+    if (result.success && createdList.length > 0) {
+      const activeCompanyId = createdList[0].companyId || localStorage.getItem('zb_active_company_id');
       const current = await browserDb.getDrivers(activeCompanyId);
-      await browserDb.saveDrivers([...current.filter((d) => d.id !== result.driver.id), result.driver], activeCompanyId);
+      const createdIds = new Set(createdList.map((d) => d.id));
+      await browserDb.saveDrivers(
+        [...current.filter((d) => !createdIds.has(d.id)), ...createdList],
+        activeCompanyId
+      );
       await api.syncVaultSnapshot({ force: true });
     }
     return result;
@@ -604,17 +679,141 @@ export const api = {
     return result;
   },
 
-  async deleteCompany(id: string): Promise<{ success: boolean; message: string }> {
+  async getCompanyStats(id: string): Promise<{
+    success: boolean;
+    company: { id: string; name: string };
+    stats: Record<string, number>;
+  }> {
+    const res = await fetchWithAutoRehydrate(`${API_BASE}/companies/${id}/stats`, {
+      headers: { ...getAuthHeader() },
+    });
+    return handleResponse(res);
+  },
+
+  async deleteCompany(id: string): Promise<{
+    success: boolean;
+    message: string;
+    deletedId?: string;
+    deletedName?: string;
+    removedCount?: number;
+  }> {
     const res = await fetchWithAutoRehydrate(`${API_BASE}/companies/${id}`, {
       method: 'DELETE',
       headers: { ...getAuthHeader() },
     });
-    const result = await handleResponse<{ success: boolean; message: string }>(res);
+    const result = await handleResponse<{
+      success: boolean;
+      message: string;
+      deletedId?: string;
+      deletedName?: string;
+      removedCount?: number;
+    }>(res);
     if (result.success) {
       await browserDb.deleteCompany(id);
       await api.syncVaultSnapshot({ force: true });
+      browserDb.broadcastSync({ type: 'COMPANY_CHANGED', companyId: id });
     }
     return result;
+  },
+
+  async cleanupOrphans(): Promise<{ serverRemoved: number; browserRemoved: number }> {
+    let serverRemoved = 0;
+    try {
+      const res = await fetchWithAutoRehydrate(`${API_BASE}/sync/cleanup-orphans`, {
+        method: 'POST',
+        headers: { ...getAuthHeader() },
+      });
+      const data = await handleResponse<{ success: boolean; removedCount: number }>(res);
+      serverRemoved = data.removedCount || 0;
+    } catch {}
+
+    let browserRemoved = 0;
+    try {
+      const res = await fetch(`${API_BASE}/sync/vault`, {
+        headers: { ...getAuthHeader() },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.success && data.vault) {
+          const validIds = (data.vault.companies || []).map((c: any) => c.id);
+          const deletedIds = data.vault.deletedCompanyIds || [];
+          const purgeRes = await browserDb.purgeOrphanedRecords(validIds, deletedIds);
+          browserRemoved = purgeRes.removedCount;
+          await browserDb.saveFullVault(data.vault);
+        }
+      }
+    } catch {}
+
+    browserDb.broadcastSync({ type: 'VAULT_REHYDRATED' });
+    return { serverRemoved, browserRemoved };
+  },
+
+  async saveToLocalStorage(): Promise<Awaited<ReturnType<typeof browserDb.getLocalStorageStats>>> {
+    let savedFromServer = false;
+    try {
+      const res = await fetch(`${API_BASE}/sync/vault`, {
+        headers: { ...getAuthHeader() },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.success && data.vault) {
+          const validIds = (data.vault.companies || []).map((c: any) => c.id);
+          const deletedIds = data.vault.deletedCompanyIds || [];
+          await browserDb.saveFullVault(data.vault);
+          await browserDb.purgeOrphanedRecords(validIds, deletedIds);
+          savedFromServer = true;
+        }
+      }
+    } catch {}
+
+    if (!savedFromServer) {
+      const existing = await browserDb.getFullVault();
+      if (existing) {
+        await browserDb.saveFullVault(existing);
+      }
+    }
+
+    return browserDb.getLocalStorageStats();
+  },
+
+  async exportFullBackup(): Promise<any> {
+    try {
+      const res = await fetch(`${API_BASE}/sync/vault`, {
+        headers: { ...getAuthHeader() },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.success && data.vault) {
+          return {
+            ...data.vault,
+            exportedAt: new Date().toISOString(),
+          };
+        }
+      }
+    } catch {}
+
+    const localVault = await browserDb.getFullVault();
+    return {
+      ...(localVault || {}),
+      exportedAt: new Date().toISOString(),
+    };
+  },
+
+  async restoreFullBackup(vault: any): Promise<{ restoredCompanies: number; totalRestored: number }> {
+    const res = await fetchWithAutoRehydrate(`${API_BASE}/sync/restore-backup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
+      body: JSON.stringify({ vault }),
+    });
+    const result = await handleResponse<{ success: boolean; restoredCompanies: number; totalRestored: number }>(res);
+    if (result.success) {
+      await api.syncVaultSnapshot({ force: true });
+      browserDb.broadcastSync({ type: 'VAULT_REHYDRATED' });
+    }
+    return {
+      restoredCompanies: result.restoredCompanies || 0,
+      totalRestored: result.totalRestored || 0,
+    };
   },
 
   // Routes

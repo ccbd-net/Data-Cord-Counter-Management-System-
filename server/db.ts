@@ -23,6 +23,7 @@ const DB_FILE = path.join(DATA_DIR, 'db.json');
 
 export interface DatabaseSchema {
   companies: (Company & { adminPinHash: string; adminPinSalt: string })[];
+  deletedCompanyIds?: string[];
   users: (User & { pinHash: string; pinSalt: string })[];
   supervisors: Supervisor[];
   drivers: Driver[];
@@ -34,6 +35,7 @@ export interface DatabaseSchema {
   reconciliations: Reconciliation[];
   auditLogs: AuditLog[];
   settings: SystemSettings;
+  companySettings?: Record<string, SystemSettings>;
   fuelEntries?: FuelEntry[];
   fuelSettings?: Record<string, FuelSettings>;
 }
@@ -114,6 +116,7 @@ function getInitialDatabase(): DatabaseSchema {
 
   return {
     companies: [],
+    deletedCompanyIds: [],
     users,
     supervisors: [],
     drivers: [],
@@ -160,6 +163,7 @@ class Database {
         const parsed = JSON.parse(fileContent);
         if (parsed.users) {
           if (!parsed.companies) parsed.companies = [];
+          if (!Array.isArray(parsed.deletedCompanyIds)) parsed.deletedCompanyIds = [];
           if (!parsed.supervisors) parsed.supervisors = [];
           if (!parsed.drivers) parsed.drivers = [];
           if (!parsed.counters) parsed.counters = [];
@@ -171,10 +175,11 @@ class Database {
           if (!parsed.auditLogs) parsed.auditLogs = [];
           if (!parsed.fuelEntries) parsed.fuelEntries = [];
           if (!parsed.fuelSettings) parsed.fuelSettings = {};
+          if (!parsed.companySettings) parsed.companySettings = {};
 
           // Migrate roles: ensure platform master admin is super_admin and company admins are company_admin
           parsed.users.forEach((u: any) => {
-            if (u.loginId === 'admin') {
+            if (u.loginId === 'admin' && !u.companyId) {
               u.role = 'super_admin';
             } else if (u.companyId && (u.role === 'master_admin' || !u.role)) {
               u.role = 'company_admin';
@@ -190,6 +195,33 @@ class Database {
             currency: parsed.settings?.currency || '৳',
             timezone: parsed.settings?.timezone || 'Asia/Dhaka',
           };
+
+          // Clean any orphaned records from deleted companies automatically on load
+          const validIds = new Set((parsed.companies || []).map((c: any) => c.id));
+          const deletedIds = new Set(parsed.deletedCompanyIds || []);
+          const isOrphan = (cmpId?: string) => {
+            if (!cmpId) return false;
+            return deletedIds.has(cmpId) || !validIds.has(cmpId);
+          };
+          parsed.users = (parsed.users || []).filter(
+            (u: any) => u.role === 'super_admin' || u.loginId?.toLowerCase() === 'admin' || (u.companyId && !isOrphan(u.companyId))
+          );
+          parsed.supervisors = (parsed.supervisors || []).filter((x: any) => !isOrphan(x.companyId));
+          parsed.drivers = (parsed.drivers || []).filter((x: any) => !isOrphan(x.companyId));
+          parsed.counters = (parsed.counters || []).filter((x: any) => !isOrphan(x.companyId));
+          parsed.vehicles = (parsed.vehicles || []).filter((x: any) => !isOrphan(x.companyId));
+          parsed.routes = (parsed.routes || []).filter((x: any) => !isOrphan(x.companyId));
+          parsed.schedules = (parsed.schedules || []).filter((x: any) => !isOrphan(x.companyId));
+          parsed.bookings = (parsed.bookings || []).filter((x: any) => !isOrphan(x.companyId));
+          parsed.reconciliations = (parsed.reconciliations || []).filter((x: any) => !isOrphan(x.companyId));
+          parsed.fuelEntries = (parsed.fuelEntries || []).filter((x: any) => !isOrphan(x.companyId));
+          if (parsed.companySettings) {
+            for (const cmpKey of Object.keys(parsed.companySettings)) {
+              if (!validIds.has(cmpKey) || deletedIds.has(cmpKey)) {
+                delete parsed.companySettings[cmpKey];
+              }
+            }
+          }
 
           return parsed;
         }
@@ -312,28 +344,131 @@ class Database {
     return comp;
   }
 
-  public deleteCompany(id: string) {
-    const index = this.getCompanies().findIndex((c) => c.id === id);
-    if (index === -1) throw new Error('কোম্পানি খুঁজে পাওয়া যায়নি!');
-    this.getCompanies().splice(index, 1);
+  public getCompanyStats(companyId: string) {
+    return {
+      users: this.data.users.filter((u) => u.companyId === companyId && u.role !== 'super_admin').length,
+      counters: this.data.counters.filter((c) => c.companyId === companyId).length,
+      vehicles: this.data.vehicles.filter((v) => v.companyId === companyId).length,
+      routes: this.data.routes.filter((r) => r.companyId === companyId).length,
+      supervisors: this.data.supervisors.filter((s) => s.companyId === companyId).length,
+      drivers: this.data.drivers.filter((d) => d.companyId === companyId).length,
+      schedules: this.data.schedules.filter((s) => s.companyId === companyId).length,
+      bookings: this.data.bookings.filter((b) => b.companyId === companyId).length,
+      reconciliations: (this.data.reconciliations || []).filter((r) => r.companyId === companyId).length,
+      fuelEntries: (this.data.fuelEntries || []).filter((f) => f.companyId === companyId).length,
+    };
+  }
 
-    // Cascade clean related records of this company
-    this.data.users = this.data.users.filter((u) => u.companyId !== id);
-    this.data.counters = this.data.counters.filter((c) => c.companyId !== id);
-    this.data.vehicles = this.data.vehicles.filter((v) => v.companyId !== id);
-    this.data.routes = this.data.routes.filter((r) => r.companyId !== id);
-    this.data.supervisors = this.data.supervisors.filter((s) => s.companyId !== id);
-    this.data.drivers = this.data.drivers.filter((d) => d.companyId !== id);
-    this.data.schedules = this.data.schedules.filter((s) => s.companyId !== id);
-    this.data.bookings = this.data.bookings.filter((b) => b.companyId !== id);
-    if (this.data.fuelEntries) {
-      this.data.fuelEntries = this.data.fuelEntries.filter((f) => f.companyId !== id);
+  public purgeOrphanedCompanyRecords(shouldSave: boolean = true): { removedCount: number } {
+    const validIds = new Set(this.getCompanies().map((c) => c.id));
+    if (!Array.isArray(this.data.deletedCompanyIds)) this.data.deletedCompanyIds = [];
+    const deletedSet = new Set(this.data.deletedCompanyIds);
+
+    let removedCount = 0;
+    const filterTenant = <T extends { companyId?: string }>(arr?: T[]): T[] => {
+      if (!Array.isArray(arr)) return [];
+      const kept = arr.filter((item) => {
+        if (!item.companyId) return false;
+        if (deletedSet.has(item.companyId)) return false;
+        return validIds.has(item.companyId);
+      });
+      removedCount += arr.length - kept.length;
+      return kept;
+    };
+
+    const initialUserLen = this.data.users.length;
+    this.data.users = this.data.users.filter(
+      (u) =>
+        u.role === 'super_admin' ||
+        u.loginId.toLowerCase() === 'admin' ||
+        (!!u.companyId && !deletedSet.has(u.companyId) && validIds.has(u.companyId))
+    );
+    removedCount += initialUserLen - this.data.users.length;
+
+    this.data.counters = filterTenant(this.data.counters);
+    this.data.vehicles = filterTenant(this.data.vehicles);
+    this.data.routes = filterTenant(this.data.routes);
+    this.data.supervisors = filterTenant(this.data.supervisors);
+    this.data.drivers = filterTenant(this.data.drivers);
+    this.data.schedules = filterTenant(this.data.schedules);
+    this.data.bookings = filterTenant(this.data.bookings);
+    this.data.reconciliations = filterTenant(this.data.reconciliations);
+    this.data.fuelEntries = filterTenant(this.data.fuelEntries);
+
+    if (this.data.fuelSettings) {
+      for (const cmpKey of Object.keys(this.data.fuelSettings)) {
+        if (cmpKey !== 'default' && (!validIds.has(cmpKey) || deletedSet.has(cmpKey))) {
+          delete this.data.fuelSettings[cmpKey];
+          removedCount++;
+        }
+      }
     }
+    if (this.data.companySettings) {
+      for (const cmpKey of Object.keys(this.data.companySettings)) {
+        if (!validIds.has(cmpKey) || deletedSet.has(cmpKey)) {
+          delete this.data.companySettings[cmpKey];
+          removedCount++;
+        }
+      }
+    }
+
+    if (shouldSave && removedCount > 0) {
+      this.save();
+    }
+    return { removedCount };
+  }
+
+  public deleteCompany(id: string): { deletedName: string; removedCount: number } {
+    const companies = this.getCompanies();
+    const index = companies.findIndex((c) => c.id === id);
+    if (index === -1) throw new Error('কোম্পানি খুঁজে পাওয়া যায়নি!');
+    const deletedName = companies[index].name;
+    companies.splice(index, 1);
+
+    if (!Array.isArray(this.data.deletedCompanyIds)) {
+      this.data.deletedCompanyIds = [];
+    }
+    if (!this.data.deletedCompanyIds.includes(id)) {
+      this.data.deletedCompanyIds.push(id);
+    }
+
+    let removedCount = 1;
+    const stripByCompany = <T extends { companyId?: string }>(arr?: T[]): T[] => {
+      if (!Array.isArray(arr)) return [];
+      const kept = arr.filter((item) => item.companyId !== id);
+      removedCount += arr.length - kept.length;
+      return kept;
+    };
+
+    // Cascade clean ONLY records belonging to this companyId (never affecting any other company)
+    const prevUsersLen = this.data.users.length;
+    this.data.users = this.data.users.filter(
+      (u) => u.role === 'super_admin' || u.loginId.toLowerCase() === 'admin' || u.companyId !== id
+    );
+    removedCount += prevUsersLen - this.data.users.length;
+
+    this.data.counters = stripByCompany(this.data.counters);
+    this.data.vehicles = stripByCompany(this.data.vehicles);
+    this.data.routes = stripByCompany(this.data.routes);
+    this.data.supervisors = stripByCompany(this.data.supervisors);
+    this.data.drivers = stripByCompany(this.data.drivers);
+    this.data.schedules = stripByCompany(this.data.schedules);
+    this.data.bookings = stripByCompany(this.data.bookings);
+    this.data.reconciliations = stripByCompany(this.data.reconciliations);
+    this.data.fuelEntries = stripByCompany(this.data.fuelEntries);
     if (this.data.fuelSettings && this.data.fuelSettings[id]) {
       delete this.data.fuelSettings[id];
+      removedCount++;
+    }
+    if (this.data.companySettings && this.data.companySettings[id]) {
+      delete this.data.companySettings[id];
+      removedCount++;
     }
 
+    const orphanRes = this.purgeOrphanedCompanyRecords(false);
+    removedCount += orphanRes.removedCount;
     this.save();
+    return { deletedName, removedCount };
   }
 
   // Routes Edit & Delete
@@ -388,7 +523,7 @@ class Database {
     this.save();
   }
 
-  // Supervisors Directory (NO LOGIN)
+  // Supervisors Directory (NO LOGIN, NAME ONLY)
   public getSupervisors(companyId?: string) {
     if (!this.data.supervisors) this.data.supervisors = [];
     if (!companyId) return this.data.supervisors;
@@ -397,10 +532,10 @@ class Database {
 
   public createSupervisor(data: { name: string; phone?: string; companyId?: string }) {
     const newSupervisor: Supervisor = {
-      id: `sup-${Date.now()}`,
+      id: `sup-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
       companyId: data.companyId,
       name: data.name.trim(),
-      phone: data.phone?.trim() || '',
+      phone: '',
       status: 'active',
       createdAt: new Date().toISOString(),
     };
@@ -409,11 +544,46 @@ class Database {
     return newSupervisor;
   }
 
+  public createSupervisorsBulk(names: string[], companyId?: string) {
+    const existingSet = new Set(
+      this.getSupervisors(companyId).map((s) => s.name.trim().toLowerCase())
+    );
+    const created: Supervisor[] = [];
+    let skippedCount = 0;
+    const baseTs = Date.now();
+    const nowIso = new Date().toISOString();
+
+    for (let i = 0; i < names.length; i++) {
+      const cleanName = names[i].trim();
+      if (!cleanName) continue;
+      const key = cleanName.toLowerCase();
+      if (existingSet.has(key)) {
+        skippedCount++;
+        continue;
+      }
+      existingSet.add(key);
+      const item: Supervisor = {
+        id: `sup-${baseTs}-${i}-${Math.floor(Math.random() * 1000)}`,
+        companyId,
+        name: cleanName,
+        phone: '',
+        status: 'active',
+        createdAt: nowIso,
+      };
+      this.getSupervisors().push(item);
+      created.push(item);
+    }
+    if (created.length > 0) {
+      this.save();
+    }
+    return { created, skippedCount };
+  }
+
   public updateSupervisor(id: string, data: Partial<Supervisor>) {
     const sup = this.getSupervisors().find((s) => s.id === id);
     if (!sup) throw new Error('সুপারভাইজার খুঁজে পাওয়া যায়নি!');
     if (data.name) sup.name = data.name.trim();
-    if (data.phone !== undefined) sup.phone = data.phone.trim();
+    sup.phone = '';
     if (data.status) sup.status = data.status;
     this.save();
     return sup;
@@ -435,10 +605,10 @@ class Database {
 
   public createDriver(data: { name: string; phone?: string; companyId?: string }) {
     const newDriver: Driver = {
-      id: `drv-${Date.now()}`,
+      id: `drv-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
       companyId: data.companyId,
       name: data.name.trim(),
-      phone: data.phone?.trim() || '',
+      phone: '',
       status: 'active',
       createdAt: new Date().toISOString(),
     };
@@ -447,11 +617,46 @@ class Database {
     return newDriver;
   }
 
+  public createDriversBulk(names: string[], companyId?: string) {
+    const existingSet = new Set(
+      this.getDrivers(companyId).map((d) => d.name.trim().toLowerCase())
+    );
+    const created: Driver[] = [];
+    let skippedCount = 0;
+    const baseTs = Date.now();
+    const nowIso = new Date().toISOString();
+
+    for (let i = 0; i < names.length; i++) {
+      const cleanName = names[i].trim();
+      if (!cleanName) continue;
+      const key = cleanName.toLowerCase();
+      if (existingSet.has(key)) {
+        skippedCount++;
+        continue;
+      }
+      existingSet.add(key);
+      const item: Driver = {
+        id: `drv-${baseTs}-${i}-${Math.floor(Math.random() * 1000)}`,
+        companyId,
+        name: cleanName,
+        phone: '',
+        status: 'active',
+        createdAt: nowIso,
+      };
+      this.getDrivers().push(item);
+      created.push(item);
+    }
+    if (created.length > 0) {
+      this.save();
+    }
+    return { created, skippedCount };
+  }
+
   public updateDriver(id: string, data: Partial<Driver>) {
     const drv = this.getDrivers().find((d) => d.id === id);
     if (!drv) throw new Error('ড্রাইভার খুঁজে পাওয়া যায়নি!');
     if (data.name) drv.name = data.name.trim();
-    if (data.phone !== undefined) drv.phone = data.phone.trim();
+    drv.phone = '';
     if (data.status) drv.status = data.status;
     this.save();
     return drv;
@@ -504,10 +709,65 @@ class Database {
     return user;
   }
 
+  public updateOwnCredentials(
+    userId: string,
+    params: { currentPin: string; newLoginId?: string; newPin?: string }
+  ): User {
+    const user = this.data.users.find((u) => u.id === userId);
+    if (!user) {
+      throw new Error('ব্যবহারকারী খুঁজে পাওয়া যায়নি!');
+    }
+
+    const currentPin = (params.currentPin || '').toString().trim();
+    if (!currentPin || !verifyPin(currentPin, user.pinHash, user.pinSalt)) {
+      throw new Error('বর্তমান পিন কোড সঠিক নয়!');
+    }
+
+    const cleanLoginId = params.newLoginId !== undefined ? params.newLoginId.trim() : '';
+    const cleanNewPin = params.newPin !== undefined ? params.newPin.trim() : '';
+
+    if (!cleanLoginId && !cleanNewPin) {
+      throw new Error('পরিবর্তনের জন্য নতুন লগইন আইডি অথবা নতুন পিন দিন।');
+    }
+
+    if (cleanLoginId && cleanLoginId.toLowerCase() !== user.loginId.toLowerCase()) {
+      if (cleanLoginId.length < 3 || /\s/.test(cleanLoginId)) {
+        throw new Error('লগইন আইডি কমপক্ষে ৩ অক্ষরের হতে হবে এবং কোনো স্পেস থাকা যাবে না।');
+      }
+      const duplicate = this.data.users.find(
+        (u) => u.id !== userId && u.loginId.toLowerCase() === cleanLoginId.toLowerCase()
+      );
+      if (duplicate) {
+        throw new Error('এই লগইন আইডি ইতিমধ্যেই ব্যবহৃত হচ্ছে। অন্য একটি ইউনিক আইডি দিন।');
+      }
+      user.loginId = cleanLoginId;
+      // Do NOT mirror updated private loginId onto Company metadata so no cross-visibility happens
+      if (user.companyId && (user.role === 'company_admin' || user.role === 'master_admin')) {
+        const comp = this.getCompanies().find((c) => c.id === user.companyId);
+        if (comp) {
+          comp.adminLoginId = '';
+        }
+      }
+    }
+
+    if (cleanNewPin) {
+      if (cleanNewPin.length < 4 || cleanNewPin.length > 6) {
+        throw new Error('নতুন পিন কোড অবশ্যই ৪ থেকে ৬ ডিজিটের হতে হবে।');
+      }
+      const salt = generateSalt();
+      user.pinSalt = salt;
+      user.pinHash = hashPin(cleanNewPin, salt);
+    }
+
+    this.save();
+    const { pinHash, pinSalt, ...safeUser } = user;
+    return safeUser;
+  }
+
   // Getters with Company Scoping
   public getUsers(companyId?: string) {
     if (!companyId) return this.data.users;
-    return this.data.users.filter((u) => u.companyId === companyId);
+    return this.data.users.filter((u) => u.companyId === companyId && u.role !== 'super_admin');
   }
 
   public getCounters(companyId?: string) {
@@ -540,18 +800,34 @@ class Database {
     return this.data.reconciliations.filter((r) => r.companyId === companyId);
   }
 
-  public getAuditLogs() {
-    return this.data.auditLogs;
+  public getAuditLogs(companyId?: string) {
+    if (!companyId) return this.data.auditLogs;
+    return this.data.auditLogs.filter((l) => l.companyId === companyId);
   }
 
-  public getSettings() {
-    return this.data.settings;
+  public getSettings(companyId?: string): SystemSettings {
+    if (!companyId) return this.data.settings;
+    const saved = this.data.companySettings?.[companyId];
+    const company = this.getCompanies().find((c) => c.id === companyId);
+    if (saved) return saved;
+    return {
+      ...this.data.settings,
+      companyName: company?.name || this.data.settings.companyName,
+      hotline: company?.phone || this.data.settings.hotline,
+    };
   }
 
-  public updateSettings(newSettings: Partial<SystemSettings>) {
-    this.data.settings = { ...this.data.settings, ...newSettings };
+  public updateSettings(newSettings: Partial<SystemSettings>, companyId?: string): SystemSettings {
+    if (!companyId) {
+      this.data.settings = { ...this.data.settings, ...newSettings };
+      this.save();
+      return this.data.settings;
+    }
+    if (!this.data.companySettings) this.data.companySettings = {};
+    const current = this.getSettings(companyId);
+    this.data.companySettings[companyId] = { ...current, ...newSettings };
     this.save();
-    return this.data.settings;
+    return this.data.companySettings[companyId];
   }
 
   // Audit Log Helper
@@ -866,6 +1142,7 @@ class Database {
   public getVaultSnapshot(): Partial<DatabaseSchema> {
     return {
       companies: this.data.companies || [],
+      deletedCompanyIds: this.data.deletedCompanyIds || [],
       users: this.data.users || [],
       supervisors: this.data.supervisors || [],
       drivers: this.data.drivers || [],
@@ -877,7 +1154,52 @@ class Database {
       reconciliations: this.data.reconciliations || [],
       fuelEntries: this.data.fuelEntries || [],
       fuelSettings: this.data.fuelSettings || {},
+      companySettings: this.data.companySettings || {},
       settings: this.data.settings,
+    };
+  }
+
+  public getScopedVaultSnapshot(companyId: string): Partial<DatabaseSchema> {
+    const company = this.getCompanies().find((c) => c.id === companyId);
+    const safeCompanies = company
+      ? [
+          {
+            id: company.id,
+            name: company.name,
+            logoUrl: company.logoUrl,
+            address: company.address,
+            phone: company.phone,
+            subscriptionExpiry: company.subscriptionExpiry,
+            adminLoginId: '',
+            adminPinHash: '',
+            adminPinSalt: '',
+            status: company.status,
+            createdAt: company.createdAt,
+          },
+        ]
+      : [];
+
+    const safeUsers = this.getUsers(companyId).map(({ pinHash, pinSalt, ...u }) => ({
+      ...u,
+      pinHash: '',
+      pinSalt: '',
+    }));
+
+    return {
+      companies: safeCompanies,
+      deletedCompanyIds: [],
+      users: safeUsers,
+      supervisors: this.getSupervisors(companyId),
+      drivers: this.getDrivers(companyId),
+      counters: this.getCounters(companyId),
+      vehicles: this.getVehicles(companyId),
+      routes: this.getRoutes(companyId),
+      schedules: this.getSchedules(companyId),
+      bookings: this.getBookings(companyId),
+      reconciliations: this.getReconciliations(companyId),
+      fuelEntries: this.getFuelEntries(companyId),
+      fuelSettings: { [companyId]: this.getFuelSettings(companyId) },
+      settings: this.getSettings(companyId),
     };
   }
 
@@ -888,20 +1210,33 @@ class Database {
 
     let restoredCount = 0;
 
-    const mergeCollection = <T extends { id: string }>(target: T[], source?: T[]) => {
+    if (!Array.isArray(this.data.deletedCompanyIds)) {
+      this.data.deletedCompanyIds = [];
+    }
+    if (Array.isArray(vault.deletedCompanyIds)) {
+      for (const delId of vault.deletedCompanyIds) {
+        if (delId && !this.data.deletedCompanyIds.includes(delId)) {
+          this.data.deletedCompanyIds.push(delId);
+        }
+      }
+    }
+    const deletedSet = new Set(this.data.deletedCompanyIds);
+
+    const mergeCollection = <T extends { id: string; companyId?: string }>(target: T[], source?: T[], isCompanyList = false) => {
       if (!Array.isArray(source)) return;
       const existingIds = new Set(target.map((item) => item.id));
       for (const item of source) {
-        if (item && item.id && !existingIds.has(item.id)) {
-          target.push(item);
-          existingIds.add(item.id);
-          restoredCount++;
-        }
+        if (!item || !item.id || existingIds.has(item.id)) continue;
+        if (isCompanyList && deletedSet.has(item.id)) continue;
+        if (!isCompanyList && item.companyId && deletedSet.has(item.companyId)) continue;
+        target.push(item);
+        existingIds.add(item.id);
+        restoredCount++;
       }
     };
 
     if (!this.data.companies) this.data.companies = [];
-    mergeCollection(this.data.companies, vault.companies);
+    mergeCollection(this.data.companies, vault.companies, true);
 
     if (Array.isArray(vault.users)) {
       const existingIds = new Set(this.data.users.map((u) => u.id));
@@ -912,6 +1247,7 @@ class Database {
           u.id &&
           u.loginId &&
           u.loginId.toLowerCase() !== 'admin' &&
+          (!u.companyId || !deletedSet.has(u.companyId)) &&
           !existingIds.has(u.id) &&
           !existingLoginIds.has(u.loginId.toLowerCase())
         ) {
@@ -953,7 +1289,7 @@ class Database {
     if (vault.fuelSettings && typeof vault.fuelSettings === 'object') {
       if (!this.data.fuelSettings) this.data.fuelSettings = {};
       for (const [cmpId, fsVal] of Object.entries(vault.fuelSettings)) {
-        if (!this.data.fuelSettings[cmpId] && fsVal) {
+        if (!deletedSet.has(cmpId) && !this.data.fuelSettings[cmpId] && fsVal) {
           this.data.fuelSettings[cmpId] = fsVal;
           restoredCount++;
         }
@@ -964,11 +1300,65 @@ class Database {
       this.data.settings = { ...this.data.settings, ...vault.settings };
     }
 
+    this.purgeOrphanedCompanyRecords(false);
     if (restoredCount > 0) {
       this.save();
     }
 
     return { restoredCount };
+  }
+
+  public restoreFullBackup(vault: Partial<DatabaseSchema>): { restoredCompanies: number; totalRestored: number } {
+    if (!vault || typeof vault !== 'object') {
+      throw new Error('অবৈধ ব্যাকআপ ফাইল ফরম্যাট।');
+    }
+
+    if (Array.isArray(vault.companies)) {
+      this.data.companies = vault.companies.filter((c) => c && c.id && c.name);
+    }
+    this.data.deletedCompanyIds = Array.isArray(vault.deletedCompanyIds) ? vault.deletedCompanyIds : [];
+
+    // Always preserve existing super_admin login accounts so admin is never locked out
+    const superAdmins = this.data.users.filter((u) => u.role === 'super_admin' || u.loginId.toLowerCase() === 'admin');
+    const incomingUsers = Array.isArray(vault.users)
+      ? vault.users.filter((u) => u && u.id && u.loginId && u.role !== 'super_admin' && u.loginId.toLowerCase() !== 'admin')
+      : [];
+    this.data.users = [...superAdmins, ...incomingUsers];
+
+    if (Array.isArray(vault.supervisors)) this.data.supervisors = vault.supervisors;
+    if (Array.isArray(vault.drivers)) this.data.drivers = vault.drivers;
+    if (Array.isArray(vault.counters)) this.data.counters = vault.counters;
+    if (Array.isArray(vault.vehicles)) this.data.vehicles = vault.vehicles;
+    if (Array.isArray(vault.routes)) this.data.routes = vault.routes;
+    if (Array.isArray(vault.schedules)) this.data.schedules = vault.schedules;
+    if (Array.isArray(vault.bookings)) this.data.bookings = vault.bookings;
+    if (Array.isArray(vault.reconciliations)) this.data.reconciliations = vault.reconciliations;
+    if (Array.isArray(vault.fuelEntries)) this.data.fuelEntries = vault.fuelEntries;
+    if (vault.fuelSettings && typeof vault.fuelSettings === 'object') {
+      this.data.fuelSettings = vault.fuelSettings;
+    }
+    if (vault.companySettings && typeof vault.companySettings === 'object') {
+      this.data.companySettings = vault.companySettings;
+    }
+    if (vault.settings && typeof vault.settings === 'object') {
+      this.data.settings = { ...this.data.settings, ...vault.settings };
+    }
+
+    this.purgeOrphanedCompanyRecords(false);
+    this.save();
+
+    const totalRestored =
+      (this.data.companies?.length || 0) +
+      (this.data.vehicles?.length || 0) +
+      (this.data.routes?.length || 0) +
+      (this.data.schedules?.length || 0) +
+      (this.data.bookings?.length || 0) +
+      (this.data.fuelEntries?.length || 0);
+
+    return {
+      restoredCompanies: this.data.companies.length,
+      totalRestored,
+    };
   }
 }
 

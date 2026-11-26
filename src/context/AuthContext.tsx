@@ -18,8 +18,16 @@ interface AuthContextType {
   isModerator: boolean;
   isBookingPoint: boolean;
   isMasterBookingCounter: boolean;
+  isFuelManager: boolean;
+  isChecker: boolean;
+  canManageFuel: boolean;
   canManageTrips: boolean;
   refreshUser: () => Promise<void>;
+  updateOwnCredentials: (params: {
+    currentPin: string;
+    newLoginId?: string;
+    newPin?: string;
+  }) => Promise<{ message: string }>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -124,17 +132,31 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
+  const updateOwnCredentials = async (params: {
+    currentPin: string;
+    newLoginId?: string;
+    newPin?: string;
+  }) => {
+    const res = await api.updateOwnCredentials(params);
+    if (res.token) setToken(res.token);
+    if (res.user) setUser(res.user);
+    return { message: res.message };
+  };
+
   const hasRole = (roles: Array<User['role']>) => {
     if (!user) return false;
     return roles.includes(user.role);
   };
 
-  const isSuperAdmin = user?.role === 'super_admin' || (!user?.companyId && user?.role === 'master_admin');
-  const isCompanyAdmin = user?.role === 'company_admin';
-  const isMasterAdmin = isSuperAdmin || isCompanyAdmin || user?.role === 'master_admin';
+  const isSuperAdmin = Boolean(user?.role === 'super_admin' && !user?.companyId);
+  const isCompanyAdmin = user?.role === 'company_admin' || Boolean(user?.companyId && user?.role === 'master_admin');
+  const isMasterAdmin = isSuperAdmin || isCompanyAdmin;
   const isModerator = user?.role === 'moderator' || isMasterAdmin;
   const isBookingPoint = user?.role === 'booking_point';
   const isMasterBookingCounter = user?.role === 'booking_point' && user?.counterType === 'master_booking';
+  const isFuelManager = user?.role === 'fuel_manager';
+  const isChecker = user?.role === 'checker';
+  const canManageFuel = isModerator || isFuelManager;
   const canManageTrips = isMasterAdmin || user?.role === 'moderator' || Boolean(isMasterBookingCounter);
 
   return (
@@ -155,8 +177,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         isModerator,
         isBookingPoint,
         isMasterBookingCounter: Boolean(isMasterBookingCounter),
+        isFuelManager,
+        isChecker,
+        canManageFuel,
         canManageTrips,
         refreshUser,
+        updateOwnCredentials,
       }}
     >
       {children}

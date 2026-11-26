@@ -22,6 +22,7 @@ const VAULT_LS_KEY = 'zb_primary_vault_backup_v1';
 
 export interface FullVaultSnapshot {
   companies?: Company[];
+  deletedCompanyIds?: string[];
   users?: any[];
   supervisors?: Supervisor[];
   drivers?: Driver[];
@@ -252,6 +253,42 @@ async function idbDeleteOne(storeName: string, id: string): Promise<void> {
   } catch {}
 }
 
+async function idbReplaceAll<T>(storeName: string, items: T[]): Promise<void> {
+  try {
+    const db = await openIndexedDB();
+    if (!db.objectStoreNames.contains(storeName)) return;
+    const tx = db.transaction(storeName, 'readwrite');
+    const store = tx.objectStore(storeName);
+    store.clear();
+    for (const item of items) {
+      store.put(item);
+    }
+    await new Promise<void>((resolve, reject) => {
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch (e) {
+    console.warn(`IndexedDB replace ${storeName} error:`, e);
+  }
+}
+
+async function idbDeleteByCompany(storeName: string, companyId: string): Promise<number> {
+  try {
+    const all = await idbGetAll<{ id: string; companyId?: string; role?: string }>(storeName);
+    const keep = all.filter((item) => {
+      if (storeName === 'users' && item.role === 'super_admin') return true;
+      return item.companyId !== companyId;
+    });
+    const removed = all.length - keep.length;
+    if (removed > 0) {
+      await idbReplaceAll(storeName, keep);
+    }
+    return removed;
+  } catch {
+    return 0;
+  }
+}
+
 /**
  * Main Browser Database Service
  */
@@ -343,20 +380,20 @@ export const browserDb = {
       console.warn('IndexedDB vault write error:', e);
     }
 
-    // 2. Also mirror individual stores
-    if (vault.companies) await idbPutMany('companies', vault.companies);
-    if (vault.users) await idbPutMany('users', vault.users);
-    if (vault.counters) await idbPutMany('counters', vault.counters);
-    if (vault.vehicles) await idbPutMany('vehicles', vault.vehicles);
-    if (vault.routes) await idbPutMany('routes', vault.routes);
-    if (vault.schedules) await idbPutMany('schedules', vault.schedules);
-    if (vault.bookings) await idbPutMany('bookings', vault.bookings);
-    if (vault.supervisors) await idbPutMany('supervisors', vault.supervisors);
-    if (vault.drivers) await idbPutMany('drivers', vault.drivers);
-    if (vault.reconciliations) await idbPutMany('reconciliations', vault.reconciliations);
-    if (vault.fuelEntries) await idbPutMany('fuelEntries', vault.fuelEntries);
+    // 2. Replace individual IndexedDB stores with authoritative snapshot (eliminates stale deleted data)
+    if (vault.companies) await idbReplaceAll('companies', vault.companies);
+    if (vault.users) await idbReplaceAll('users', vault.users);
+    if (vault.counters) await idbReplaceAll('counters', vault.counters);
+    if (vault.vehicles) await idbReplaceAll('vehicles', vault.vehicles);
+    if (vault.routes) await idbReplaceAll('routes', vault.routes);
+    if (vault.schedules) await idbReplaceAll('schedules', vault.schedules);
+    if (vault.bookings) await idbReplaceAll('bookings', vault.bookings);
+    if (vault.supervisors) await idbReplaceAll('supervisors', vault.supervisors);
+    if (vault.drivers) await idbReplaceAll('drivers', vault.drivers);
+    if (vault.reconciliations) await idbReplaceAll('reconciliations', vault.reconciliations);
+    if (vault.fuelEntries) await idbReplaceAll('fuelEntries', vault.fuelEntries);
 
-    // 3. Mirror to LocalStorage if within quota
+    // 3. Mirror to LocalStorage
     try {
       localStorage.setItem(VAULT_LS_KEY, JSON.stringify(payload));
     } catch {
@@ -376,6 +413,12 @@ export const browserDb = {
     if (vault.companies) {
       writeLocalStorage(getStorageKey('companies', 'all'), vault.companies);
     }
+    if (vault.vehicles) writeLocalStorage(getStorageKey('vehicles', 'all'), vault.vehicles);
+    if (vault.counters) writeLocalStorage(getStorageKey('counters', 'all'), vault.counters);
+    if (vault.routes) writeLocalStorage(getStorageKey('routes', 'all'), vault.routes);
+    if (vault.schedules) writeLocalStorage(getStorageKey('schedules', 'all'), vault.schedules);
+    if (vault.bookings) writeLocalStorage(getStorageKey('bookings', 'all'), vault.bookings);
+    if (vault.fuelEntries) writeLocalStorage(getStorageKey('fuelEntries', 'all'), vault.fuelEntries);
   },
 
   async getFullVault(): Promise<FullVaultSnapshot | null> {
@@ -495,16 +538,51 @@ export const browserDb = {
 
   async deleteCompany(companyId: string): Promise<void> {
     await idbDeleteOne('companies', companyId);
-    const existing = readLocalStorage<Company>(getStorageKey('companies', 'all')).filter(
-      (c) => c.id !== companyId
-    );
-    writeLocalStorage(getStorageKey('companies', 'all'), existing);
 
-    // Also strip company's items from cached vault
+    const tenantStores = [
+      'users',
+      'counters',
+      'vehicles',
+      'routes',
+      'supervisors',
+      'drivers',
+      'schedules',
+      'bookings',
+      'reconciliations',
+      'fuelEntries',
+    ];
+    for (const st of tenantStores) {
+      await idbDeleteByCompany(st, companyId);
+    }
+
+    if (typeof window !== 'undefined') {
+      // Remove all company-scoped localStorage keys and strip from global cache keys
+      Object.keys(localStorage).forEach((k) => {
+        if (k.startsWith('zb_cache_') && k.endsWith(`_${companyId}`)) {
+          localStorage.removeItem(k);
+        } else if (k.startsWith('zb_cache_') && k.endsWith('_all')) {
+          const list = readLocalStorage<{ id: string; companyId?: string; role?: string }>(k);
+          if (k === getStorageKey('companies', 'all')) {
+            writeLocalStorage(k, list.filter((c) => c.id !== companyId));
+          } else {
+            writeLocalStorage(
+              k,
+              list.filter((item) => item.role === 'super_admin' || item.companyId !== companyId)
+            );
+          }
+        }
+      });
+    }
+
+    // Strip company's items from cached vault and record tombstone
     const vault = await this.getFullVault();
     if (vault) {
+      const deletedIds = Array.isArray(vault.deletedCompanyIds) ? [...vault.deletedCompanyIds] : [];
+      if (!deletedIds.includes(companyId)) deletedIds.push(companyId);
+
+      vault.deletedCompanyIds = deletedIds;
       vault.companies = (vault.companies || []).filter((c) => c.id !== companyId);
-      vault.users = (vault.users || []).filter((u) => u.companyId !== companyId);
+      vault.users = (vault.users || []).filter((u) => u.role === 'super_admin' || u.companyId !== companyId);
       vault.counters = (vault.counters || []).filter((c) => c.companyId !== companyId);
       vault.vehicles = (vault.vehicles || []).filter((v) => v.companyId !== companyId);
       vault.routes = (vault.routes || []).filter((r) => r.companyId !== companyId);
@@ -512,11 +590,144 @@ export const browserDb = {
       vault.drivers = (vault.drivers || []).filter((d) => d.companyId !== companyId);
       vault.schedules = (vault.schedules || []).filter((s) => s.companyId !== companyId);
       vault.bookings = (vault.bookings || []).filter((b) => b.companyId !== companyId);
+      vault.reconciliations = (vault.reconciliations || []).filter((r) => r.companyId !== companyId);
       vault.fuelEntries = (vault.fuelEntries || []).filter((f) => f.companyId !== companyId);
+      if (vault.fuelSettings && vault.fuelSettings[companyId]) {
+        delete vault.fuelSettings[companyId];
+      }
       await this.saveFullVault(vault);
     }
 
     this.broadcastSync({ type: 'COMPANY_CHANGED', companyId });
+  },
+
+  async purgeOrphanedRecords(validCompanyIds: string[], deletedCompanyIds: string[] = []): Promise<{ removedCount: number }> {
+    const validSet = new Set(validCompanyIds);
+    const deletedSet = new Set(deletedCompanyIds);
+    let removedCount = 0;
+
+    const isOrphanItem = (item: { companyId?: string; role?: string; loginId?: string }, isUsers = false) => {
+      if (isUsers && (item.role === 'super_admin' || item.loginId?.toLowerCase() === 'admin')) return false;
+      if (!item.companyId) return true;
+      if (deletedSet.has(item.companyId)) return true;
+      return !validSet.has(item.companyId);
+    };
+
+    const tenantStores = [
+      'users',
+      'counters',
+      'vehicles',
+      'routes',
+      'supervisors',
+      'drivers',
+      'schedules',
+      'bookings',
+      'reconciliations',
+      'fuelEntries',
+    ];
+
+    for (const st of tenantStores) {
+      const all = await idbGetAll<{ id: string; companyId?: string; role?: string; loginId?: string }>(st);
+      const keep = all.filter((item) => !isOrphanItem(item, st === 'users'));
+      if (keep.length !== all.length) {
+        removedCount += all.length - keep.length;
+        await idbReplaceAll(st, keep);
+      }
+    }
+
+    const idbCompanies = await idbGetAll<Company>('companies');
+    const keepCompanies = idbCompanies.filter((c) => validSet.has(c.id) && !deletedSet.has(c.id));
+    if (keepCompanies.length !== idbCompanies.length) {
+      removedCount += idbCompanies.length - keepCompanies.length;
+      await idbReplaceAll('companies', keepCompanies);
+    }
+
+    if (typeof window !== 'undefined') {
+      Object.keys(localStorage).forEach((k) => {
+        if (!k.startsWith('zb_cache_')) return;
+        const parts = k.replace('zb_cache_', '').split('_');
+        const cmpPart = parts.slice(1).join('_');
+        if (cmpPart && cmpPart !== 'all') {
+          if (!validSet.has(cmpPart) || deletedSet.has(cmpPart)) {
+            localStorage.removeItem(k);
+            removedCount++;
+          }
+        } else if (cmpPart === 'all') {
+          const list = readLocalStorage<any>(k);
+          if (k === getStorageKey('companies', 'all')) {
+            const cleaned = list.filter((c: any) => validSet.has(c.id) && !deletedSet.has(c.id));
+            if (cleaned.length !== list.length) {
+              removedCount += list.length - cleaned.length;
+              writeLocalStorage(k, cleaned);
+            }
+          } else {
+            const cleaned = list.filter((item: any) => !isOrphanItem(item, false));
+            if (cleaned.length !== list.length) {
+              removedCount += list.length - cleaned.length;
+              writeLocalStorage(k, cleaned);
+            }
+          }
+        }
+      });
+    }
+
+    const vault = await this.getFullVault();
+    if (vault) {
+      const nextVault: FullVaultSnapshot = {
+        ...vault,
+        deletedCompanyIds: Array.from(new Set([...(vault.deletedCompanyIds || []), ...deletedCompanyIds])),
+        companies: (vault.companies || []).filter((c) => validSet.has(c.id) && !deletedSet.has(c.id)),
+        users: (vault.users || []).filter((u) => !isOrphanItem(u, true)),
+        counters: (vault.counters || []).filter((c) => !isOrphanItem(c)),
+        vehicles: (vault.vehicles || []).filter((v) => !isOrphanItem(v)),
+        routes: (vault.routes || []).filter((r) => !isOrphanItem(r)),
+        supervisors: (vault.supervisors || []).filter((s) => !isOrphanItem(s)),
+        drivers: (vault.drivers || []).filter((d) => !isOrphanItem(d)),
+        schedules: (vault.schedules || []).filter((s) => !isOrphanItem(s)),
+        bookings: (vault.bookings || []).filter((b) => !isOrphanItem(b)),
+        reconciliations: (vault.reconciliations || []).filter((r) => !isOrphanItem(r)),
+        fuelEntries: (vault.fuelEntries || []).filter((f) => !isOrphanItem(f)),
+      };
+      await this.saveFullVault(nextVault);
+    }
+
+    return { removedCount };
+  },
+
+  async getLocalStorageStats(): Promise<{
+    hasLocalBackup: boolean;
+    updatedAt: string | null;
+    localStorageBytes: number;
+    companies: number;
+    vehicles: number;
+    routes: number;
+    schedules: number;
+    bookings: number;
+    fuelEntries: number;
+    reconciliations: number;
+    users: number;
+  }> {
+    let localStorageBytes = 0;
+    if (typeof window !== 'undefined') {
+      try {
+        const raw = localStorage.getItem(VAULT_LS_KEY) || '';
+        localStorageBytes = new Blob([raw]).size;
+      } catch {}
+    }
+    const vault = await this.getFullVault();
+    return {
+      hasLocalBackup: !!vault && ((vault.companies?.length || 0) > 0 || (vault.vehicles?.length || 0) > 0),
+      updatedAt: vault?.updatedAt || null,
+      localStorageBytes,
+      companies: vault?.companies?.length || 0,
+      vehicles: vault?.vehicles?.length || 0,
+      routes: vault?.routes?.length || 0,
+      schedules: vault?.schedules?.length || 0,
+      bookings: vault?.bookings?.length || 0,
+      fuelEntries: vault?.fuelEntries?.length || 0,
+      reconciliations: vault?.reconciliations?.length || 0,
+      users: vault?.users?.length || 0,
+    };
   },
 
   // -------------------------------------------------------------

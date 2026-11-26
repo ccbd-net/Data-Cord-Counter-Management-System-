@@ -1,11 +1,13 @@
 // Progressive Web App Service Worker
-const CACHE_NAME = 'cms-pwa-v1';
+const CACHE_NAME = 'cms-pwa-v2';
 const ASSETS_TO_CACHE = [
   '/',
   '/index.html',
   '/manifest.json',
   '/manifest.webmanifest',
-  '/favicon.svg',
+  '/favicon.ico',
+  '/favicon.png',
+  '/logo.png',
   '/pwa-192x192.png',
   '/pwa-512x512.png',
   '/apple-touch-icon.png',

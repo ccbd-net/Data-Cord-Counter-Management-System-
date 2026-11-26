@@ -42,7 +42,7 @@ import { PWAInstallBanner } from './components/PWAInstallBanner.tsx';
 const VALID_TABS = new Set<NavTab>(Object.keys(TAB_TITLES) as NavTab[]);
 
 function MainLayout() {
-  const { user, loading } = useAuth();
+  const { user, loading, isFuelManager, isChecker, isSuperAdmin, isMasterAdmin, isModerator, canManageTrips, canManageFuel } = useAuth();
   const [currentTab, setCurrentTabState] = useState<NavTab>(() => {
     try {
       const saved = localStorage.getItem('zb_active_tab') as NavTab | null;
@@ -62,7 +62,12 @@ function MainLayout() {
   if (loading) {
     return (
       <div className="min-h-screen bg-slate-900 flex flex-col items-center justify-center text-white">
-        <div className="w-12 h-12 border-4 border-emerald-500 border-t-transparent rounded-full animate-spin mb-4" />
+        <img
+          src="/assets/aistudio/1795612353186_f79fafda.jpg"
+          alt="Data Code Logo"
+          className="w-20 h-20 rounded-2xl object-cover shadow-2xl border border-emerald-500/40 mb-4"
+        />
+        <div className="w-8 h-8 border-3 border-emerald-500 border-t-transparent rounded-full animate-spin mb-3" />
         <div className="text-sm font-bold tracking-wider">কাউন্টার ম্যানেজমেন্ট সিস্টেম লোড হচ্ছে...</div>
       </div>
     );
@@ -72,13 +77,34 @@ function MainLayout() {
     return <LoginPage />;
   }
 
+  const isTabAllowed = (tab: NavTab): boolean => {
+    if (isFuelManager) {
+      return tab === 'dashboard' || tab === 'fuel_management' || tab === 'daily_schedules' || tab === 'database';
+    }
+    if (isChecker) {
+      return tab === 'dashboard' || tab === 'seat_booking' || tab === 'ticket_print' || tab === 'daily_schedules' || tab === 'database';
+    }
+    if (tab === 'company_admin') return isSuperAdmin;
+    if (tab === 'settings') return isMasterAdmin;
+    if (tab === 'schedule_maker' || tab === 'routes') return canManageTrips;
+    if (tab === 'fuel_management') return canManageFuel;
+    if (tab === 'reconciliation' || tab === 'counters' || tab === 'vehicles' || tab === 'users') return isModerator;
+    return true;
+  };
+
+  const effectiveTab: NavTab = isTabAllowed(currentTab)
+    ? currentTab
+    : isFuelManager
+    ? 'fuel_management'
+    : 'dashboard';
+
   // Jump helper
   const navigateTo = (tab: NavTab) => {
     setCurrentTab(tab);
   };
 
   const renderCurrentPage = () => {
-    switch (currentTab) {
+    switch (effectiveTab) {
       case 'dashboard':
         return <DashboardPage onNavigateTo={navigateTo} />;
       case 'company_admin':
@@ -128,7 +154,7 @@ function MainLayout() {
     <div className="min-h-screen bg-slate-50 flex overflow-hidden">
       {/* Sidebar Navigation */}
       <Sidebar
-        currentTab={currentTab}
+        currentTab={effectiveTab}
         onSelectTab={setCurrentTab}
         isOpen={mobileMenuOpen}
         onCloseMobile={() => setMobileMenuOpen(false)}
@@ -138,7 +164,7 @@ function MainLayout() {
       <div className="flex-1 flex flex-col min-w-0 h-screen overflow-y-auto">
         <PWAInstallBanner />
         <Header
-          pageTitle={TAB_TITLES[currentTab] || 'কাউন্টার ম্যানেজমেন্ট সিস্টেম'}
+          pageTitle={TAB_TITLES[effectiveTab] || 'কাউন্টার ম্যানেজমেন্ট সিস্টেম'}
           onToggleMobileMenu={() => setMobileMenuOpen(!mobileMenuOpen)}
         />
 

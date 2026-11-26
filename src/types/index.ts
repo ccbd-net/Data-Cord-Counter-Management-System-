@@ -14,7 +14,15 @@ export interface User {
   id: string;
   loginId: string;
   name: string;
-  role: 'super_admin' | 'company_admin' | 'master_admin' | 'moderator' | 'booking_point' | 'down_counter_head';
+  role:
+    | 'super_admin'
+    | 'company_admin'
+    | 'master_admin'
+    | 'moderator'
+    | 'booking_point'
+    | 'down_counter_head'
+    | 'fuel_manager'
+    | 'checker';
   companyId?: string;
   company?: {
     id?: string;
@@ -32,6 +40,7 @@ export interface User {
   counterType?: 'master_booking' | 'road_booking';
   phone: string;
   status: 'active' | 'inactive';
+  isCredentialHidden?: boolean;
   createdAt: string;
 }
 
@@ -233,6 +242,7 @@ export interface Reconciliation {
 
 export interface AuditLog {
   id: string;
+  companyId?: string;
   timestamp: string;
   userId: string;
   userName: string;
@@ -332,6 +342,8 @@ export interface FuelEntry {
   actualFuelLiters: number;
   fuelRatePerLiter: number;
   totalCost: number;
+  expectedFuelCost?: number;
+  fuelCostDifference?: number;
   fuelDifference: number;
   notes?: string;
   createdAt: string;

@@ -3,6 +3,11 @@ import { useAuth } from '../context/AuthContext.tsx';
 import { api } from '../services/api.ts';
 import type { Vehicle, SeatCapacity, Schedule } from '../types/index.ts';
 import { toBengaliDigits, formatTaka, getTodayDhakaDate, formatBengaliDate } from '../utils/formatters.ts';
+import {
+  buildWhatsAppUrl,
+  normalizeWhatsAppPhone,
+  buildOwnerWhatsAppMessage,
+} from '../utils/whatsapp.ts';
 import { SeatMap } from '../components/SeatMap.tsx';
 import {
   Bus,
@@ -13,17 +18,13 @@ import {
   CheckCircle,
   RefreshCw,
   X,
-  Armchair,
-  Check,
   User,
   Phone,
-  Calendar,
   FileSpreadsheet,
   Printer,
-  FileText,
-  Briefcase,
   Layers,
   Trash2,
+  MessageCircle,
 } from 'lucide-react';
 
 export const VehiclesPage: React.FC = () => {
@@ -218,7 +219,7 @@ export const VehiclesPage: React.FC = () => {
   // Export Owner Trip Report to Excel/CSV
   const exportOwnerReportToExcel = () => {
     if (ownerStats.length === 0) {
-      alert('এক্সপোর্ট করার মতো মালিক তথ্য নেই!');
+      setErrorMsg('এক্সপোর্ট করার মতো মালিক তথ্য নেই!');
       return;
     }
 
@@ -442,10 +443,27 @@ export const VehiclesPage: React.FC = () => {
                             </td>
                             <td className="py-2.5 px-3 border-r border-slate-200 font-mono text-slate-700">
                               {v.ownerPhone ? (
-                                <a href={`tel:${v.ownerPhone}`} className="hover:text-emerald-700 flex items-center gap-1">
-                                  <Phone className="w-3 h-3 text-slate-400" />
-                                  <span>{v.ownerPhone}</span>
-                                </a>
+                                <div className="flex items-center gap-2">
+                                  <a href={`tel:${v.ownerPhone}`} className="hover:text-emerald-700 flex items-center gap-1">
+                                    <Phone className="w-3 h-3 text-slate-400" />
+                                    <span>{v.ownerPhone}</span>
+                                  </a>
+                                  {normalizeWhatsAppPhone(v.ownerPhone) && (
+                                    <a
+                                      href={buildWhatsAppUrl(
+                                        v.ownerPhone,
+                                        `*${user?.company?.name || 'কাউন্টার টিকেটিং'}*\nমালিক: ${v.ownerName || 'সাধারণ'}\nগাড়ি: ${v.regNo}\nআজ (${reportDate}) ট্রিপ: ${toBengaliDigits(todayCount)} টি\nচলতি মাস (${reportMonth}) ট্রিপ: ${toBengaliDigits(monthCount)} টি`
+                                      )}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="inline-flex items-center gap-1 px-2 py-0.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 rounded text-[10px] font-sans font-bold"
+                                      title="হোয়াটসঅ্যাপে বার্তা পাঠান"
+                                    >
+                                      <MessageCircle className="w-3 h-3" />
+                                      <span>WA</span>
+                                    </a>
+                                  )}
+                                </div>
                               ) : (
                                 <span className="text-slate-400 italic">প্রযোজ্য নয়</span>
                               )}
@@ -566,15 +584,32 @@ export const VehiclesPage: React.FC = () => {
                       </div>
 
                       {v.ownerPhone && (
-                        <div className="flex items-center justify-between">
+                        <div className="flex items-center justify-between gap-2">
                           <span className="text-slate-500 font-medium">মালিকের মোবাইল:</span>
-                          <a
-                            href={`tel:${v.ownerPhone}`}
-                            className="font-mono text-emerald-700 font-semibold hover:underline flex items-center gap-1"
-                          >
-                            <Phone className="w-3 h-3" />
-                            <span>{v.ownerPhone}</span>
-                          </a>
+                          <div className="flex items-center gap-2">
+                            <a
+                              href={`tel:${v.ownerPhone}`}
+                              className="font-mono text-emerald-700 font-semibold hover:underline flex items-center gap-1"
+                            >
+                              <Phone className="w-3 h-3" />
+                              <span>{v.ownerPhone}</span>
+                            </a>
+                            {normalizeWhatsAppPhone(v.ownerPhone) && (
+                              <a
+                                href={buildWhatsAppUrl(
+                                  v.ownerPhone,
+                                  `*${user?.company?.name || 'কাউন্টার টিকেটিং'}*\nমালিক: ${v.ownerName || 'সাধারণ'}\nগাড়ি: ${v.regNo}\nআজ (${reportDate}) ট্রিপ: ${toBengaliDigits(todayCount)} টি\nচলতি মাস (${reportMonth}) ট্রিপ: ${toBengaliDigits(monthCount)} টি`
+                                )}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-flex items-center gap-1 px-2 py-0.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-md text-[10px] font-bold"
+                                title="হোয়াটসঅ্যাপে বার্তা পাঠান"
+                              >
+                                <MessageCircle className="w-3 h-3" />
+                                <span>হোয়াটসঅ্যাপ</span>
+                              </a>
+                            )}
+                          </div>
                         </div>
                       )}
 
@@ -795,6 +830,46 @@ export const VehiclesPage: React.FC = () => {
                         সিট: {formatTaka(monthlySeatFare)} | মাল: {formatTaka(monthlyCargo)}
                       </div>
                     </div>
+                  </div>
+
+                  {/* Direct WhatsApp Owner Report Action */}
+                  <div className="pt-2 border-t border-slate-100 flex items-center justify-between gap-2">
+                    {normalizeWhatsAppPhone(o.ownerPhone) ? (
+                      <a
+                        href={buildWhatsAppUrl(
+                          o.ownerPhone,
+                          buildOwnerWhatsAppMessage(
+                            user?.company?.name || 'কাউন্টার টিকেটিং',
+                            'মালিকভিত্তিক গাড়ির ট্রিপ ও আয় রিপোর্ট',
+                            `${reportDate} (${formatBengaliDate(reportDate)})`,
+                            {
+                              ownerName: o.ownerName,
+                              ownerPhone: o.ownerPhone,
+                              vehicles: o.vehicles.map((v) => v.regNo),
+                              tripCount: o.dailyTrips.length,
+                              bookedSeats: dailySeats,
+                              seatFare: dailySeatFare,
+                              cargoFare: dailyCargo,
+                              totalFare: dailyAmount,
+                              customLines: [
+                                `চলতি মাস (${reportMonth}) মোট ট্রিপ: ${toBengaliDigits(o.monthlyTrips.length)} টি`,
+                                `মাসিক যাত্রী: ${toBengaliDigits(monthlySeats)} জন | মাসিক আয়: ${formatTaka(monthlyAmount)}`,
+                              ],
+                            }
+                          )
+                        )}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="w-full py-2 px-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 shadow-xs transition-colors"
+                      >
+                        <MessageCircle className="w-4 h-4" />
+                        <span>হোয়াটসঅ্যাপে হিসাব পাঠান ({o.ownerPhone})</span>
+                      </a>
+                    ) : (
+                      <div className="w-full py-2 px-3 bg-slate-100 text-slate-500 rounded-xl text-[11px] font-semibold text-center">
+                        হোয়াটসঅ্যাপে পাঠাতে মালিকের সঠিক ১১ সংখ্যার মোবাইল নম্বর যুক্ত করুন
+                      </div>
+                    )}
                   </div>
                 </div>
               );
